@@ -1,0 +1,13 @@
+{
+  "name": "dsh-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 云端转发配套：桌面桥 + 测试客户端（relay 服务端为 Rust，见 relay-server/）",
+  "scripts": {
+    "bridge": "node bridge.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

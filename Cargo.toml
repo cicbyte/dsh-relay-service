@@ -1,0 +1,16 @@
+[package]
+name = "dsh-relay-server"
+version = "0.1.0"
+edition = "2021"
+description = "DSH 云端转发 relay 服务端（dsh-relay-v1）"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+
+[profile.release]
+lto = true
