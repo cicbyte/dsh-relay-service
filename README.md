@@ -7,11 +7,11 @@
 
 | 组件 | 位置 | 语言 | 运行位置 |
 |---|---|---|---|
-| relay 服务端 | `relay-server/` | **Rust**（tokio + tokio-tungstenite） | 公网 VPS |
-| 桌面桥（**推荐：dsh 插件**） | `dsh-plugin-mobile-bridge/` | Node.js（cordis bundle） | dsh 进程内，随 dsh 启停 |
-| 桌面桥（独立脚本，兼容保留） | `bridge.mjs` | Node.js | 跑 dsh web 的桌面机 |
-| 测试客户端 | `test-client.mjs` / `test-mux.mjs` | Node.js | 任意 |
-| 手机接入 | `lib/dsh/transport.dart::RelayTransport` | Dart | App 内「云端转发」模式 |
+| relay 服务端 | 本仓库 `src/` | **Rust**（tokio + tokio-tungstenite） | 公网 VPS |
+| 桌面桥（**推荐：dsh 插件**） | [`../dsh-relay-plugin/`](../dsh-relay-plugin) | Node.js（cordis bundle） | dsh 进程内，随 dsh 启停 |
+| 桌面桥（独立脚本，兼容保留） | `test/bridge.mjs` | Node.js | 跑 dsh web 的桌面机 |
+| 测试客户端 | `test/test-client.mjs` / `test/test-mux.mjs` | Node.js | 任意 |
+| 手机接入 | [`../dsh-relay-mobile/`](../dsh-relay-mobile) `lib/dsh/transport.dart::RelayTransport` | Dart | App 内「云端转发」模式 |
 
 ## 帧协议（文本帧，UTF-8 JSON，一帧一对象，单帧 ≤ 4 MiB）
 
@@ -35,7 +35,7 @@ S→C  ping {t} / C→S  pong {t}                    心跳 15s，3 次未应答
 
 ```powershell
 # VPS：relay 服务端（Rust）
-cd relay/relay-server
+cd dsh-relay-service
 cargo build --release            # 产出 target/release/dsh-relay-server.exe（Linux 同理）
 $env:PORT='8787'                 # 或 HOST/PORT 环境变量
 ./target/release/dsh-relay-server
@@ -43,10 +43,10 @@ $env:PORT='8787'                 # 或 HOST/PORT 环境变量
 
 # 桌面机：桥（与 dsh web 同机）
 # 方式 A（推荐）：装进 dsh profile 当插件，随 dsh 启停自动挂载
-#   dsh plugin --profile web add link:<同盘 junction 或插件目录>   # 详见 dsh-plugin-mobile-bridge/README.md
-#   配置 $DSH_HOME/mobile-bridge.json（relayUrl/code/dshUrl）后重启 dsh web
+#   dsh plugin --profile web add link:<同盘 junction 或插件目录>   # 详见 ../dsh-relay-plugin/README.md
+#   配置走设置页「手机通道」，或兜底 $DSH_HOME/mobile-bridge.json（relayUrl/code/dshUrl）
 # 方式 B（独立脚本，调试/应急）：
-cd relay
+cd test
 npm install                      # 只有 ws 一个依赖
 $env:RELAY_URL='wss://your-vps:8787'
 $env:RELAY_CODE='<长随机配对码>'   # 与手机端输入一致
@@ -58,8 +58,8 @@ node bridge.mjs
 ## 自测
 
 ```powershell
-node test-client.mjs ws://127.0.0.1:8787 <code>   # HTTP 通道：session/list
-node test-mux.mjs     ws://127.0.0.1:8787 <code> <sessionId>  # WS 隧道：session/follow 快照
+node test/test-client.mjs ws://127.0.0.1:8787 <code>   # HTTP 通道：session/list
+node test/test-mux.mjs     ws://127.0.0.1:8787 <code> <sessionId>  # WS 隧道：session/follow 快照
 ```
 
 ## v2 方向（对齐 ZCode SPEC）
