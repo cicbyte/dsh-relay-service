@@ -46,10 +46,10 @@ dsh-relay-service/
 ## 帧协议（文本帧，UTF-8 JSON，一帧一对象，单帧 ≤ 4 MiB）
 
 ```
-C→S  hello {role:'host'|'client', code, deviceId?, token?, pairingCode?, name?}
+C→S  hello {role:'host'|'client', code?, deviceId?, token?, pairingCode?, name?}
                               首帧，10s 内必须到达；auth_mode=device 时必须带 token 或 pairingCode
-S→C  welcome {role, peerOnline, room, auth:'token'|'pairing'|'code', device?:{id,token}}
-S→C  reject {code} | peer {online} | bye {code}
+S→C  welcome {role, peerOnline, clients, room, auth:'token'|'pairing'|'code', device?:{id,token}}
+S→C  reject {code} | peer {online, clients:[...]} | bye {code}
 双向 http-req {rid, method, path, body}          手机→桥：HTTP 请求
 双向 http-res {rid, status, body, setCookie?}    桥→手机：HTTP 响应
 双向 ws-open {rid, path, headers?}               手机→桥：WS 隧道（桥以 ws-frame{text:'__open__'} 应答）
@@ -58,13 +58,43 @@ S→C  reject {code} | peer {online} | bye {code}
 双向 error {rid?, code, message}
 ```
 
-- 配对码（code）划分房间：1 host + 1 client；同角色后到踢先到（`bye{superseded}`）。
-- **设备鉴权（默认 fail-closed）**：管理台生成一次性配对码（`XXXX-XXXX`，600s/单次/
-  失败 5 次熔断）→ 客户端 `hello{pairingCode}` 配对 → `welcome.device` 下发设备 ID +
-  令牌（明文只此一次）→ 之后 `hello{deviceId, token}` 重连。令牌可吊销/轮换，吊销即时踢线。
+### 环境模型（1 host : N client）
+
+- **房间（room）= 一台桌面 + N 台手机**（家里/公司各一个环境）。host 同角色后到踢先到；
+  client **只被同设备顶替**（`bye{superseded}`），多台手机同时在线互不干扰。
+- 设备凭证决定房间归属：绑房间的配对码/设备记录是权威。
+  **带 `deviceId+token` 或 `pairingCode` 时 hello 必须省略 `code`**——`code` 的
+  SHA-256 前 4 字节是「共享码模式」的房间主张，混用会误触发 `room-mismatch`。
+  `code` 仅供旧共享码模式（`AUTH_MODE=code`，历史兼容）。
+- **rid 前缀路由**（多手机并发关键）：client→host 时 relay 把业务帧 `rid` 改写为
+  `<cid>.<rid>`；host→client 按前缀剥离并定向回包；无前缀的 rid 回退「唯一 client」。
+  rid 对桥/手机两端始终不透明，业务载荷零改动。
+- welcome 携带 `clients`（同房其他在线手机 cid 列表）；peer 帧 `{online, clients}`
+  广播手机进出。
+
+### 设备鉴权（默认 fail-closed）
+
+- 管理台/设备代领生成一次性配对码（`XXXX-XXXX`，600s/单次/失败 5 次熔断）→
+  客户端 `hello{pairingCode}` 配对 → `welcome.device` 下发设备 ID + 令牌
+  （明文只此一次，客户端须立即进安全存储）→ 之后 `hello{deviceId, token}` 重连。
+  令牌可吊销/轮换，吊销即时踢线；鉴权类拒绝客户端必须停止自动重连（防风暴）。
+- **设备代领**：`POST /api/invite`（公开路由，`Authorization: Bearer tok_*` +
+  `X-Device-id`）——host 设备可为自家房间签发 `role=client` 配对码，家人免管理台入网。
 - reject 码：`auth-required` / `bad-token` / `revoked` / `unknown-device` / `role-mismatch` /
   `room-mismatch` / `pairing-invalid|expired|used|burned` / `rate-limited` / `bad-hello|role|code`。
 - 背压：出站队列 64 条，溢出踢线（`bye{overflow}`）。relay 不解析业务载荷。
+
+### 扫码入网 payload（二维码规范）
+
+```
+dshrelay[s]://<host>:<port>/?pair=<一次性配对码>&room=<房间hex8>&name=<环境名>
+dshlan://<ip>:<port>/?code=<安全码>&name=<环境名>
+```
+
+- `dshrelay://`：管理台环境视图 / 桥设置页「生成手机配对码」产出；手机扫码即建
+  「云端转发」环境并即扫即配（配对码 10 分钟有效、单次核销）。
+- `dshlan://`：桌面 dsh web 产出（局域网直连场景）；手机扫码即建「局域网」环境。
+- 两条 payload 的解析端在手机 App（`qr_payload.dart`），字段缺省可空。
 
 ## 部署
 
@@ -75,7 +105,10 @@ cargo build --release            # 产出 target/release/dsh-relay-server（.exe
 $env:ADMIN_PASSWORD='<强口令>'    # 可选；不设则首启随机生成并打印
 ./target/release/dsh-relay-server
 # 管理台 http://<vps>:8788/   WS ws://<vps>:8787（协议 dsh-relay-v1）
-# 生产务必置于 TLS 后：Caddy/Nginx 反代（wss://），勿裸奔公网明文
+# 生产务必置于 TLS 后：Caddy/Nginx 反代（wss://），勿裸奔公网明文。
+# 本轮 relay 自身不做 TLS（家用无域名/图省事场景反代门槛高，明文+设备令牌先跑通）；
+# Caddy 两行配置即可：your.domain { reverse_proxy 127.0.0.1:8787 }（ws 自动升级）
+# 管理台（8788）同理反代 443；公网直连 8787/8788 属自担风险。
 
 # 桌面机：桥（与 dsh web 同机）
 # 方式 A（推荐）：装进 dsh profile 当插件，随 dsh 启停自动挂载
