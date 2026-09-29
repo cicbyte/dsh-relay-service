@@ -10,7 +10,7 @@
       <a-form-item label="角色">
         <a-select v-model:value="role" style="width: 180px">
           <a-select-option value="client">client（手机）</a-select-option>
-          <a-select-option value="host">host（主端）</a-select-option>
+          <a-select-option value="host">host（dsh）</a-select-option>
         </a-select>
       </a-form-item>
       <a-form-item label="设备名">
