@@ -94,8 +94,9 @@ watch([menuItems, collapsed], () => {
 
 function onMenuClick({ key }: { key: string | number }) {
   const k = String(key)
-  // 仅叶子菜单导航；目录交给 a-menu 自身展开/收起
-  if (MENU.some((top) => top.key === k)) return
+  // 只有带子菜单的目录不导航（交给 a-menu 自身展开/收起）；一级叶子（概览）正常跳转
+  const dir = MENU.find((top) => top.key === k)
+  if (dir?.children?.length) return
   if (k !== route.path) router.push(k)
 }
 
