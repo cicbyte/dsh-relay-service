@@ -1,0 +1,13 @@
+[package]
+name = "relay-middleware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dsh-relay 中间件：管理端认证 / 登录限速 / 操作日志（对齐 byte-middleware）"
+
+[dependencies]
+axum.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+relay-common.workspace = true
+relay-service.workspace = true

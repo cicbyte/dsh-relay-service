@@ -1,16 +1,60 @@
-[package]
-name = "dsh-relay-server"
-version = "0.1.0"
-edition = "2021"
-description = "DSH 云端转发 relay 服务端（dsh-relay-v1）"
+[workspace]
+resolver = "2"
+members = [
+    "apps/relay",
+    "crates/common",
+    "crates/entity",
+    "crates/migration",
+    "crates/middleware",
+    "crates/service",
+]
 
-[dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Web / 异步运行时
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
+
+# 数据库（对齐 byte-admin：sea-orm + sqlite，单机部署轻量）
+sea-orm = { version = "1", features = ["runtime-tokio-rustls", "sqlx-sqlite", "macros", "with-chrono"] }
+sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+
+# 认证 / 安全
+jsonwebtoken = "9"
+bcrypt = "0.15"
 sha2 = "0.10"
 subtle = "2"
+getrandom = "0.2"
+
+# 可观测性
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 文档
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# 其他
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# 内部 crate（对齐 byte-admin 的 byte-* 分层）
+relay-common = { path = "crates/common" }
+relay-entity = { path = "crates/entity" }
+relay-migration = { path = "crates/migration" }
+relay-middleware = { path = "crates/middleware" }
+relay-service = { path = "crates/service" }
 
 [profile.release]
 lto = true

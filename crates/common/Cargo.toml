@@ -1,0 +1,20 @@
+[package]
+name = "relay-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dsh-relay 公共层：配置/响应壳/错误/JWT/状态/分页/连接枢纽（对齐 byte-common）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+axum.workspace = true
+tokio.workspace = true
+sea-orm.workspace = true
+jsonwebtoken.workspace = true
+bcrypt.workspace = true
+getrandom.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+utoipa.workspace = true

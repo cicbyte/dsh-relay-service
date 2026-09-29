@@ -1,0 +1,16 @@
+[package]
+name = "relay-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dsh-relay 数据库迁移与种子（对齐 byte-migration）"
+
+[dependencies]
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+relay-entity.workspace = true
+bcrypt.workspace = true
+getrandom.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

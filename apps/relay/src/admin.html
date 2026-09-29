@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-relay 管理台</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36; --text: #e6e9f0;
+    --muted: #8b93a7; --primary: #4c7dff; --ok: #2fbf71; --warn: #e0a53a; --danger: #e05a5a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 system-ui, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .stat .v { font-size: 24px; font-weight: 700; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; }
+  .btn { border: 1px solid var(--line); background: #1e2330; color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  .btn:hover { border-color: var(--primary); }
+  .btn.primary { background: var(--primary); border-color: var(--primary); }
+  .btn.danger { color: var(--danger); }
+  input, select { background: #10141c; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+  input:focus, select:focus { outline: none; border-color: var(--primary); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .tag.ok { background: rgba(47,191,113,.15); color: var(--ok); }
+  .tag.off { background: rgba(139,147,167,.15); color: var(--muted); }
+  .tag.danger { background: rgba(224,90,90,.15); color: var(--danger); }
+  .muted { color: var(--muted); }
+  .mono { font-family: Consolas, monospace; }
+  .bigcode { font-size: 30px; letter-spacing: 4px; font-family: Consolas, monospace; padding: 12px 18px; background: #10141c; border: 1px dashed var(--primary); border-radius: 12px; display: inline-block; }
+  .banner { background: rgba(224,165,58,.12); border: 1px solid var(--warn); color: var(--warn); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+  #toast { position: fixed; right: 20px; bottom: 20px; background: #1e2330; border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; display: none; }
+  #login { max-width: 380px; margin: 12vh auto; }
+  #login input { width: 100%; margin-bottom: 10px; }
+  #login .btn { width: 100%; padding: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login" class="card" style="display:none">
+    <h2>dsh-relay 管理台</h2>
+    <input id="username" placeholder="用户名" value="admin" autocomplete="username">
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+    <button class="btn primary" onclick="login()">登 录</button>
+    <div class="muted" style="margin-top:10px;font-size:12px">初始密码在服务启动日志中打印（只显示一次）</div>
+  </div>
+
+  <div id="main" style="display:none">
+    <h1>dsh-relay 管理台 <span class="muted" style="font-size:12px" id="who"></span>
+      <button class="btn" style="float:right" onclick="logout()">退出</button>
+    </h1>
+    <div id="insecure" class="banner" style="display:none">⚠ 当前经未加密 HTTP 传输，令牌与密码可被窃听。公网部署请置于 TLS 反代（Caddy/Nginx）之后。</div>
+
+    <div class="grid" id="stats"></div>
+
+    <div class="card">
+      <h2>设备管理</h2>
+      <table>
+        <thead><tr><th>设备</th><th>ID</th><th>角色</th><th>房间</th><th>状态</th><th>最近活跃</th><th style="width:210px">操作</th></tr></thead>
+        <tbody id="devices"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>配对码（一次性 · 10 分钟有效）</h2>
+      <div class="row">
+        <select id="pairRole">
+          <option value="client">client（手机）</option>
+          <option value="host">host（桌面桥）</option>
+        </select>
+        <input id="pairName" placeholder="设备名（可选）" style="width:200px">
+        <button class="btn primary" onclick="issuePairing()">生成配对码</button>
+        <span id="pairOut"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>审计日志</h2>
+      <table>
+        <thead><tr><th>时间</th><th>事件</th><th>IP</th><th>设备</th><th>详情</th></tr></thead>
+        <tbody id="audit"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const KEY = 'dsh-relay-admin-v2';
+let session = JSON.parse(localStorage.getItem(KEY) || 'null');
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 2600);
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (session?.access_token) headers['Authorization'] = 'Bearer ' + session.access_token;
+  let res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401 && session?.refresh_token) {
+    const r = await fetch('/api/auth/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: session.refresh_token })
+    });
+    const rc = await r.json();
+    if (r.ok && rc.code === 200) {
+      session = rc.result; localStorage.setItem(KEY, JSON.stringify(session));
+      headers['Authorization'] = 'Bearer ' + session.access_token;
+      res = await fetch(path, Object.assign({}, opts, { headers }));
+    } else { session = null; localStorage.removeItem(KEY); showLogin(); throw new Error('登录已过期'); }
+  }
+  const body = await res.json();
+  if (body.code !== 200) throw new Error(body.message || ('请求失败 ' + res.status));
+  return body.result;
+}
+
+function showLogin() {
+  document.getElementById('login').style.display = 'block';
+  document.getElementById('main').style.display = 'none';
+}
+function showMain() {
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('main').style.display = 'block';
+  document.getElementById('who').textContent = session?.username ? '(' + session.username + ')' : '';
+  if (location.protocol !== 'https:') document.getElementById('insecure').style.display = 'block';
+  refresh(); setInterval(refresh, 15000);
+}
+
+async function login() {
+  try {
+    session = await api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value
+      })
+    });
+    localStorage.setItem(KEY, JSON.stringify(session));
+    showMain();
+  } catch (e) { toast(e.message); }
+}
+
+async function logout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  session = null; localStorage.removeItem(KEY); showLogin();
+}
+
+async function refresh() {
+  try {
+    const [st, devices, audit] = await Promise.all([
+      api('/api/status'), api('/api/devices'), api('/api/audit?limit=50')
+    ]);
+    renderStats(st); renderDevices(devices); renderAudit(audit);
+  } catch (e) { toast(e.message); }
+}
+
+function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : '-'; }
+
+function renderStats(st) {
+  document.getElementById('stats').innerHTML = [
+    ['设备总数', st.devices_total], ['在线设备', st.devices_online],
+    ['在线房间', st.ws.rooms], ['Host / Client', st.ws.hosts + ' / ' + st.ws.clients],
+    ['活跃配对码', st.pairing_active], ['鉴权模式', st.auth_mode]
+  ].map(([k, v]) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+}
+
+function renderDevices(devices) {
+  document.getElementById('devices').innerHTML = devices.map(d => `
+    <tr>
+      <td>${d.name || '-'}</td>
+      <td class="mono">${d.id}</td>
+      <td>${d.role}</td>
+      <td class="mono">${d.room || '*'}</td>
+      <td>${d.revoked ? '<span class="tag danger">已吊销</span>' : (d.online ? '<span class="tag ok">在线</span>' : '<span class="tag off">离线</span>')}</td>
+      <td class="muted">${fmtTime(d.last_seen_at)}</td>
+      <td>
+        ${d.revoked
+          ? `<button class="btn" onclick="rotate('${d.id}')">轮换令牌</button>`
+          : `<button class="btn danger" onclick="revoke('${d.id}')">吊销</button>
+             <button class="btn" onclick="rotate('${d.id}')">轮换</button>`}
+        <button class="btn danger" onclick="removeDev('${d.id}')">删除</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="7" class="muted">暂无设备：在下方生成配对码，在手机 App / 桌面桥中绑定</td></tr>';
+}
+
+function renderAudit(rows) {
+  document.getElementById('audit').innerHTML = rows.map(r => `
+    <tr>
+      <td class="muted">${fmtTime(r.ts)}</td>
+      <td class="mono">${r.event}</td>
+      <td class="mono">${r.ip}</td>
+      <td class="mono">${r.device || '-'}</td>
+      <td class="muted mono" style="font-size:12px">${r.detail}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">暂无记录</td></tr>';
+}
+
+async function issuePairing() {
+  try {
+    const out = await api('/api/pairing-codes', {
+      method: 'POST',
+      body: JSON.stringify({
+        role: document.getElementById('pairRole').value,
+        name: document.getElementById('pairName').value.trim()
+      })
+    });
+    document.getElementById('pairOut').innerHTML = `<span class="bigcode">${out.code}</span>`;
+  } catch (e) { toast(e.message); }
+}
+
+async function revoke(id) {
+  if (!confirm('吊销 ' + id + '？该设备将立即被踢下线。')) return;
+  try { await api('/api/devices/' + id + '/revoke', { method: 'POST' }); toast('已吊销'); refresh(); }
+  catch (e) { toast(e.message); }
+}
+
+async function rotate(id) {
+  if (!confirm('轮换 ' + id + ' 的令牌？旧令牌立即失效。')) return;
+  try {
+    const out = await api('/api/devices/' + id + '/rotate', { method: 'POST' });
+    prompt('新令牌（只显示这一次，请立即保存）:', out.token);
+    refresh();
+  } catch (e) { toast(e.message); }
+}
+
+async function removeDev(id) {
+  if (!confirm('删除设备 ' + id + '？')) return;
+  try { await api('/api/devices/' + id, { method: 'DELETE' }); toast('已删除'); refresh(); }
+  catch (e) { toast(e.message); }
+}
+
+document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+(async () => {
+  if (session?.access_token) showMain(); else showLogin();
+})();
+</script>
+</body>
+</html>

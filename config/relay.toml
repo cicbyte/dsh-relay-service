@@ -1,0 +1,38 @@
+# dsh-relay-service 配置（分层加载：内置默认 < 本文件 < 环境变量）
+# 环境变量：RELAY_CONFIG / RELAY_HOST / RELAY_PORT / RELAY_WS_HOST / RELAY_WS_PORT
+#           RELAY_DATABASE_URL / RELAY_AUTH_MODE / JWT_SECRET
+
+[server]
+# 管理台 / API 监听
+host = "0.0.0.0"
+port = 8788
+# 是否信任反向代理头（X-Forwarded-For / X-Real-IP）。直连暴露时保持 false，
+# 防伪造头绕过限速/污染审计；部署在可信反代（nginx/Caddy）后改为 true
+trust_proxy = false
+# 是否暴露 /api/openapi.json 与文档页（生产建议 false）
+swagger = true
+
+[ws]
+# WS 转发数据面监听（手机 App / 桌面桥）
+host = "0.0.0.0"
+port = 8787
+# 鉴权模式：device=设备令牌/配对码（默认，fail-closed）| code=旧共享配对码（兼容）
+auth_mode = "device"
+
+[database]
+url = "sqlite://data/relay.db?mode=rwc"
+
+[jwt]
+# 留空时：环境变量 JWT_SECRET > data/jwt.secret 自动生成
+secret = ""
+access_ttl_secs = 7200
+refresh_ttl_secs = 604800
+
+[rate_limit]
+# 登录失败限速：窗口内失败达到上限即拦
+login_max_fails = 10
+window_secs = 60
+
+[audit]
+# 审计保留天数（超期由启动清理任务删除；0=不清理）
+retain_days = 90
