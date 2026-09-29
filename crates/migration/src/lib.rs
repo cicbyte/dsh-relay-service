@@ -6,13 +6,17 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTr
 use sea_orm_migration::MigratorTrait;
 
 mod m20260601_000001_init;
+mod m20260602_000001_rooms;
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
-        vec![Box::new(m20260601_000001_init::Migration)]
+        vec![
+            Box::new(m20260601_000001_init::Migration),
+            Box::new(m20260602_000001_rooms::Migration),
+        ]
     }
 }
 

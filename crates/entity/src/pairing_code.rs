@@ -12,6 +12,8 @@ pub struct Model {
     pub role: String,
     /// 预设设备名（可空）
     pub name: String,
+    /// 绑定的环境 room hex8（None=未绑，核销按 hello.code 派生）
+    pub room: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
     /// 核销后记录设备 ID

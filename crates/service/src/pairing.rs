@@ -18,6 +18,7 @@ pub enum PairErr {
     Expired,
     Used,
     Burned,
+    RoomMismatch,
 }
 
 impl PairErr {
@@ -27,6 +28,7 @@ impl PairErr {
             PairErr::Expired => "pairing-expired",
             PairErr::Used => "pairing-used",
             PairErr::Burned => "pairing-burned",
+            PairErr::RoomMismatch => "room-mismatch",
         }
     }
 }
@@ -37,17 +39,30 @@ pub struct PairingView {
     pub code: String,
     pub role: String,
     pub name: String,
+    /// 绑定的环境（room hex8；空串=未绑，核销时按 hello.code 派生）
+    pub room: String,
     pub expires_at: i64,
 }
 
-/// 签发一次性配对码（XXXX-XXXX，易读字母表）
+/// 签发一次性配对码（XXXX-XXXX，易读字母表）。room 非空时出码即绑环境。
 pub async fn issue(
     state: &AppState,
     role: &str,
     name: &str,
+    room: &str,
 ) -> Result<PairingView, AppError> {
     if role != "host" && role != "client" {
         return Err(AppError::bad_request("role 只能是 host 或 client"));
+    }
+    if !room.is_empty() {
+        // 环境必须存在（管理台环境视图出码）
+        if relay_entity::room::Entity::find_by_id(room)
+            .one(&state.db)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::bad_request("环境不存在"));
+        }
     }
     let code = new_pair_code();
     let now = now_secs();
@@ -55,6 +70,7 @@ pub async fn issue(
         code: Set(code.clone()),
         role: Set(role.to_string()),
         name: Set(name.to_string()),
+        room: Set(Some(room.to_string())),
         created_at: Set(now),
         expires_at: Set(now + PAIR_TTL_SECS),
         used_by: Set(None),
@@ -66,6 +82,7 @@ pub async fn issue(
         code,
         role: role.to_string(),
         name: name.to_string(),
+        room: room.to_string(),
         expires_at: now + PAIR_TTL_SECS,
     })
 }
@@ -99,6 +116,20 @@ pub async fn redeem(
     if !row.role.is_empty() && row.role != role {
         return Err(PairErr::Invalid);
     }
+    // 房间决议：出码绑了房间则以码为准（hello.code 只做寻址交叉校验）；
+    // 未绑码（legacy）必须由 hello.code 派生
+    let bound = row.room.clone().unwrap_or_default();
+    let final_room = if !bound.is_empty() {
+        if !room.is_empty() && bound != room {
+            return Err(PairErr::RoomMismatch);
+        }
+        bound
+    } else {
+        if room.is_empty() {
+            return Err(PairErr::Invalid);
+        }
+        room.to_string()
+    };
 
     let token = crate::device::new_token();
     let dev_id = format!("dev_{}", rand_hex(6));
@@ -109,13 +140,16 @@ pub async fn redeem(
     } else {
         "device".to_string()
     };
-    let dev = crate::device::create(state, &dev_id, &dev_name, role, room, &token)
+    let dev = crate::device::create(state, &dev_id, &dev_name, role, &final_room, &token)
         .await
         .map_err(|_| PairErr::Invalid)?;
 
     let mut am = row.into_active_model();
     am.used_by = Set(Some(dev_id));
     let _ = am.update(&state.db).await;
+
+    // 记录环境（展示名由管理台维护）
+    let _ = crate::room::touch(state, &final_room).await;
 
     Ok((dev, token))
 }

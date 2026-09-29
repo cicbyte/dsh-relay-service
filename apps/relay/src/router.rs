@@ -20,6 +20,7 @@ pub fn build(state: AppState) -> Router {
     let mut public = Router::new()
         .route("/api/health", get(handlers::health::simple))
         .route("/api/health/detail", get(handlers::health::detail))
+        .route("/api/invite", axum::routing::post(handlers::pairing::device_invite))
         .merge(auth_public);
     if state.config.server.swagger {
         public = public.route("/api/openapi.json", get(handlers::openapi::spec));
@@ -31,6 +32,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/auth/profile", get(handlers::auth::profile))
         .route("/api/auth/password", post(handlers::auth::change_password))
         .route("/api/status", get(handlers::status::overview))
+        .route("/api/rooms", get(handlers::rooms::list).post(handlers::rooms::create))
+        .route("/api/rooms/{room}", axum::routing::put(handlers::rooms::rename))
         .route("/api/devices", get(handlers::devices::list))
         .route("/api/devices/{id}/revoke", post(handlers::devices::revoke))
         .route("/api/devices/{id}/rotate", post(handlers::devices::rotate))

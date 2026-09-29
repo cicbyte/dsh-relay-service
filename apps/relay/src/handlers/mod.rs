@@ -7,4 +7,5 @@ pub mod health;
 pub mod openapi;
 pub mod page;
 pub mod pairing;
+pub mod rooms;
 pub mod status;

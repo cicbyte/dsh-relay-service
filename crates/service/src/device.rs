@@ -80,7 +80,8 @@ pub async fn check_token(
     if !d.role.is_empty() && d.role != role {
         return Err(TokenErr::RoleMismatch);
     }
-    if !d.room.is_empty() && d.room != room {
+    // room 为空 = 不做寻址校验（令牌绑定的房间即权威）
+    if !room.is_empty() && !d.room.is_empty() && d.room != room {
         return Err(TokenErr::RoomMismatch);
     }
     let want = hash_token(token);

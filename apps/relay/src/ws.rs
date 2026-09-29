@@ -186,17 +186,18 @@ async fn handle(
         return Err("bad-role".into());
     };
     let code = hv.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    if code.len() < 6 {
-        let _ = sink.send(Message::Text(reject_msg("bad-code"))).await;
-        return Err("bad-code".into());
-    }
     if rate.blocked(&ip) {
         let _ = sink
             .send(Message::Text(reject_msg("rate-limited")))
             .await;
         return Err("rate-limited".into());
     }
-    let room = room_of(code);
+    // code 兼作寻址/共享码：带令牌或绑房间的配对码时可省略（room 以设备记录为准）
+    let mut room = if code.is_empty() {
+        String::new()
+    } else {
+        room_of(code)
+    };
 
     // ---- 鉴权（device 模式 fail-closed；code 模式为旧共享码兼容） ----
     let device_id;
@@ -219,6 +220,7 @@ async fn handle(
         if !pair_code.is_empty() {
             match relay_service::pairing::redeem(&state, pair_code, role_s, &room, name).await {
                 Ok((dev, token)) => {
+                    room = dev.room.clone();
                     device_id = dev.id.clone();
                     pair_issued = Some((dev.id, token));
                     auth_tag = "pairing";
@@ -233,6 +235,7 @@ async fn handle(
             let dev_id = hv.get("deviceId").and_then(|v| v.as_str()).unwrap_or("");
             match relay_service::device::check_token(&state, dev_id, token, role_s, &room).await {
                 Ok(dev) => {
+                    room = dev.room.clone();
                     device_id = dev.id.clone();
                     auth_tag = "token";
                     relay_service::device::touch(&state, &device_id).await;
@@ -251,9 +254,16 @@ async fn handle(
             return Err("auth-required".into());
         }
     } else {
+        // code 模式：共享码即密钥（旧客户端兼容），必须带 code
+        if code.len() < 6 {
+            let _ = sink.send(Message::Text(reject_msg("bad-code"))).await;
+            return Err("bad-code".into());
+        }
         device_id = format!("u{}", room);
     }
     rate.reset(&ip);
+    // 环境登记（幂等；管理台环境视图展示）
+    let _ = relay_service::room::touch(&state, &room).await;
 
     // ---- 入房 ----
     let (tx, mut rx) = mpsc::channel::<WsOut>(256);
@@ -263,6 +273,7 @@ async fn handle(
         "type": "welcome",
         "role": role_s,
         "peerOnline": join.peer_online,
+        "clients": join.clients,
         "room": room,
         "auth": auth_tag,
     });
@@ -274,19 +285,12 @@ async fn handle(
         return Err("send welcome failed".into());
     }
 
-    // 同角色后到踢先到
+    // 被顶替连接踢线（host 一房一岗 / client 同设备重连）
     if let Some(old_tx) = join.replaced {
         let _ = old_tx.try_send(WsOut::Text(bye_msg("superseded")));
         let _ = old_tx.try_send(WsOut::Close);
     }
-    // 通知对端上线
-    if join.peer_online {
-        if let Some(peer_tx) = state.hub.peer_of(&room, role.str()) {
-            let _ = peer_tx
-                .send(WsOut::Text(json_text(&json!({ "type": "peer", "online": true }))))
-                .await;
-        }
-    }
+    // 对端上线通知（peer 帧）由 hub.join 内部下发
 
     relay_service::audit::record(
         &state,
@@ -318,9 +322,41 @@ async fn handle(
                                             let _ = sink.send(Message::Text(json_text(&json!({ "type": "pong" })))).await;
                                         }
                                         Some(t) if matches!(t, "http-req" | "http-res" | "ws-open" | "ws-frame" | "ws-close" | "error") => {
-                                            if let Some(peer_tx) = state.hub.peer_of(&room, role.str()) {
-                                                if peer_tx.send(WsOut::Text(text)).await.is_err() {
-                                                    let _ = sink.send(Message::Text(json_text(&json!({ "type": "peer", "online": false })))).await;
+                                            // rid 回程路由：client→host 加 cid 前缀；host→client 拆前缀定向
+                                            let rid = v.get("rid").and_then(|r| r.as_str()).unwrap_or("").to_string();
+                                            if role_s == "client" {
+                                                let mut v = v;
+                                                v["rid"] = json!(format!("{}.{}", join.cid, rid));
+                                                let out = v.to_string();
+                                                match state.hub.host_tx(&room) {
+                                                    Some(host_tx) if host_tx.send(WsOut::Text(out)).await.is_ok() => {}
+                                                    _ => {
+                                                        let _ = sink.send(Message::Text(json_text(&json!({
+                                                            "type": "error", "rid": rid,
+                                                            "code": "peer-offline", "message": "host offline"
+                                                        })))).await;
+                                                    }
+                                                }
+                                            } else {
+                                                // host→client：rid 形如 "cid.orig"；无前缀时单 client 兼容直达
+                                                let (cid, orig) = match rid.split_once('.') {
+                                                    Some((c, o)) => (Some(c.to_string()), o.to_string()),
+                                                    None => state.hub.sole_client(&room)
+                                                        .map(|(c, _)| (Some(c), rid.clone()))
+                                                        .unwrap_or((None, rid.clone())),
+                                                };
+                                                match cid {
+                                                    Some(cid) => {
+                                                        let mut v = v;
+                                                        v["rid"] = json!(orig);
+                                                        let out = v.to_string();
+                                                        if let Some(ctx) = state.hub.client_tx(&room, &cid) {
+                                                            let _ = ctx.send(WsOut::Text(out)).await;
+                                                        }
+                                                    }
+                                                    None => {
+                                                        tracing::warn!(room = %room, rid = %rid, "host 帧 rid 无前缀且多 client，丢弃");
+                                                    }
                                                 }
                                             }
                                         }
@@ -361,11 +397,8 @@ async fn handle(
     }
 
     // ---- 离房 ----
-    if let Some(peer_tx) = state.hub.leave(join.id) {
-        let _ = peer_tx
-            .send(WsOut::Text(json_text(&json!({ "type": "peer", "online": false }))))
-            .await;
-    }
+    // 对端离线/在线数通知由 hub.leave 内部下发
+    state.hub.leave(join.id);
     relay_service::audit::record(
         &state,
         "conn.close",
