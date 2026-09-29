@@ -51,7 +51,6 @@ const MENU: AntMenuItem[] = [
     icon: () => h(ICONS.ApiOutlined),
     children: [
       { key: '/devices', label: '设备管理', icon: () => h(ICONS.MobileOutlined) },
-      { key: '/pairing', label: '配对码', icon: () => h(ICONS.KeyOutlined) },
     ],
   },
   {

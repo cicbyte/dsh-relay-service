@@ -33,12 +33,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '设备管理', parent: '通道管理', icon: 'MobileOutlined' },
       },
       {
-        path: 'pairing',
-        name: 'pairing',
-        component: () => import('@/views/pairing/index.vue'),
-        meta: { title: '配对码', parent: '通道管理', icon: 'KeyOutlined' },
-      },
-      {
         path: 'audit',
         name: 'audit',
         component: () => import('@/views/audit/index.vue'),
