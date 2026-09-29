@@ -1,59 +1,48 @@
 <template>
-  <a-card title="审计日志">
-    <template #extra>
+  <ProTable
+    ref="tableRef"
+    table-key="relay-audit"
+    row-key="id"
+    :columns="columns"
+    :fetch="fetchAudit"
+    :page-size="20"
+  >
+    <template #toolBar>
       <a-space>
-        <a-select v-model:value="limit" style="width: 120px" @change="load">
+        <span class="muted">条数</span>
+        <a-select v-model:value="limit" style="width: 120px" @change="reload">
           <a-select-option :value="20">20 条</a-select-option>
           <a-select-option :value="50">50 条</a-select-option>
           <a-select-option :value="200">200 条</a-select-option>
         </a-select>
-        <a-button @click="load">刷新</a-button>
       </a-space>
     </template>
-    <a-table
-      :data-source="rows"
-      :columns="columns"
-      row-key="id"
-      :loading="loading"
-      :pagination="{ pageSize: 20 }"
-      size="middle"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'ts'">
-          <span class="muted">{{ fmtTime(record.ts) }}</span>
-        </template>
-        <template v-else-if="column.key === 'event'">
-          <a-tag :color="eventColor(record.event)">{{ record.event }}</a-tag>
-        </template>
-        <template v-else-if="column.key === 'detail'">
-          <span class="mono muted">{{ record.detail }}</span>
-        </template>
+    <template #bodyCell="{ column, record }">
+      <template v-if="column.key === 'event'">
+        <a-tag :color="eventColor(record.event)">{{ record.event }}</a-tag>
       </template>
-    </a-table>
-  </a-card>
+      <template v-else-if="column.key === 'detail'">
+        <span class="mono muted">{{ record.detail }}</span>
+      </template>
+    </template>
+  </ProTable>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import dayjs from 'dayjs'
-import type { AuditView } from '@/api/audit'
+import { ref } from 'vue'
+import ProTable, { type ProColumn } from '@/components/ProTable/index.vue'
 import { listAudit } from '@/api/audit'
 
-const rows = ref<AuditView[]>([])
-const loading = ref(false)
 const limit = ref(50)
+const tableRef = ref<{ reload: () => void; refresh: () => void } | null>(null)
 
-const columns = [
-  { title: '时间', key: 'ts', width: 180 },
-  { title: '事件', key: 'event', width: 150 },
+const columns: ProColumn[] = [
+  { title: '时间', dataIndex: 'ts', key: 'ts', width: 180 },
+  { title: '事件', dataIndex: 'event', key: 'event', width: 150 },
   { title: 'IP', dataIndex: 'ip', key: 'ip', width: 140 },
-  { title: '设备', dataIndex: 'device', key: 'device', width: 160 },
-  { title: '详情', key: 'detail' },
+  { title: '设备', dataIndex: 'device', key: 'device', width: 180 },
+  { title: '详情', dataIndex: 'detail', key: 'detail', ellipsis: true },
 ]
-
-function fmtTime(t: number) {
-  return t ? dayjs(t * 1000).format('YYYY-MM-DD HH:mm:ss') : '-'
-}
 
 function eventColor(event: string) {
   if (event.startsWith('conn.')) return 'blue'
@@ -61,21 +50,24 @@ function eventColor(event: string) {
   return 'default'
 }
 
-async function load() {
-  loading.value = true
-  try {
-    rows.value = await listAudit(limit.value)
-  } finally {
-    loading.value = false
+/** 时间倒序取前 N 条 + 前端分页 */
+async function fetchAudit({ pageNum, pageSize }: { pageNum: number; pageSize: number }) {
+  const all = await listAudit(limit.value)
+  return {
+    list: all.slice((pageNum - 1) * pageSize, pageNum * pageSize),
+    total: all.length,
   }
 }
 
-onMounted(load)
+function reload() {
+  tableRef.value?.reload()
+}
 </script>
 
 <style scoped>
 .muted {
-  color: #888;
+  color: var(--app-text-muted);
+  font-size: 13px;
 }
 .mono {
   font-family: Consolas, monospace;
