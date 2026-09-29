@@ -24,7 +24,7 @@
           <template #overlay>
             <a-menu @click="({ key }: any) => onCtxMenu(String(key), r)">
               <a-menu-item key="rename"><EditOutlined /> 重命名</a-menu-item>
-              <a-menu-item key="pair-host"><KeyOutlined /> 生成 Host 配对码</a-menu-item>
+              <a-menu-item key="pair-host"><KeyOutlined /> 生成主端配对码</a-menu-item>
               <a-menu-item key="pair-client"><MobileOutlined /> 生成手机配对码</a-menu-item>
               <a-menu-item key="copy-id"><CopyOutlined /> 复制环境 ID</a-menu-item>
               <a-menu-divider />
@@ -52,13 +52,15 @@
             <div class="env-sub">环境 ID {{ current.room }} · 创建于 {{ fmtDateTime(current.createdAt) }}</div>
           </div>
           <a-space>
-            <a-button type="primary" @click="openPair('host')"><KeyOutlined /> Host 配对码</a-button>
+            <a-button type="primary" @click="openPair('host')"><KeyOutlined /> 主端配对码</a-button>
             <a-button @click="openPair('client')"><MobileOutlined /> 手机配对码</a-button>
           </a-space>
         </div>
       </a-card>
 
-      <a-card title="桌面桥（Host）" class="sec-card">
+      <!-- 有设备（主端或手机任一存在）：常规两卡；全空：分步接入引导 -->
+      <template v-if="current.host || current.clients.length">
+      <a-card title="主端（Host）" class="sec-card">
         <div v-if="current.host" class="dev-row">
           <div>
             <div class="dev-name">
@@ -79,9 +81,9 @@
         </div>
         <div v-else class="dev-empty">
           <DisconnectOutlined class="dev-empty-icon" />
-          <div class="dev-empty-title">桌面桥尚未接入</div>
-          <div class="dev-empty-desc">生成 Host 配对码，在桌面 dsh「手机通道」里填码或扫码；桥上线后此处亮起绿点</div>
-          <a-button type="primary" @click="openPair('host')"><KeyOutlined /> 生成 Host 配对码</a-button>
+          <div class="dev-empty-title">主端尚未接入</div>
+          <div class="dev-empty-desc">生成主端配对码，在 dsh「手机通道」设置里填入或扫码（桌面端、网页端均可担任主端）；上线后此处亮起绿点</div>
+          <a-button type="primary" @click="openPair('host')"><KeyOutlined /> 生成主端配对码</a-button>
         </div>
       </a-card>
 
@@ -117,8 +119,32 @@
         <div v-if="!current.clients.length" class="dev-empty">
           <MobileOutlined class="dev-empty-icon" />
           <div class="dev-empty-title">还没有手机接入</div>
-          <div class="dev-empty-desc">生成手机配对码，家人用 dsh 手机 App 扫码即连（也可在桌面桥设置页生成）</div>
+          <div class="dev-empty-desc">生成手机配对码，家人用 dsh 手机 App 扫码即连（也可在主端的手机通道设置里生成）</div>
           <a-button @click="openPair('client')"><MobileOutlined /> 生成手机配对码</a-button>
+        </div>
+      </a-card>
+      </template>
+
+      <!-- 全空：分步接入引导（先主端后手机） -->
+      <a-card v-else class="sec-card">
+        <template #title>快速接入</template>
+        <div class="guide">
+          <div class="guide-step">
+            <div class="guide-no on">1</div>
+            <div class="guide-body">
+              <div class="guide-title">先接入主端（Host）</div>
+              <div class="guide-desc">生成主端配对码，在 dsh 的「手机通道」设置里填入或扫码——桌面端、网页端均可担任主端。上线后此处亮起绿点。</div>
+              <a-button type="primary" @click="openPair('host')"><KeyOutlined /> 生成主端配对码</a-button>
+            </div>
+          </div>
+          <div class="guide-step">
+            <div class="guide-no">2</div>
+            <div class="guide-body">
+              <div class="guide-title">再接入手机（可多台）</div>
+              <div class="guide-desc">生成手机配对码，用 dsh 手机 App 扫码加入本环境；主端上线后即可互通。</div>
+              <a-button @click="openPair('client')"><MobileOutlined /> 生成手机配对码</a-button>
+            </div>
+          </div>
         </div>
       </a-card>
     </div>
@@ -128,7 +154,7 @@
       <p class="hero-desc">
         {{ rooms.length
           ? '从左侧列表选择环境，查看接入状态与配对码。'
-          : '环境 = 一台桌面 + 多台手机。创建后生成配对码，桌面桥与手机扫码即可接入。' }}
+          : '环境 = 一个 dsh 端 + 多台手机。创建后生成配对码，主端与手机扫码即可接入。' }}
       </p>
       <a-button v-if="!rooms.length" type="primary" size="large" @click="onCreateEnv">
         <PlusOutlined /> 新建环境
@@ -136,13 +162,13 @@
     </div>
 
     <!-- 出码 + 二维码 -->
-    <a-modal v-model:open="pairOpen" :title="pairRole === 'host' ? 'Host 配对码' : '手机配对码'" :footer="null" :width="560">
+    <a-modal v-model:open="pairOpen" :title="pairRole === 'host' ? '主端配对码' : '手机配对码'" :footer="null" :width="560">
       <a-form layout="vertical" :model="pairForm" @finish="onIssue">
         <a-form-item label="中继地址（手机可达的 relay 地址）" name="addr">
           <a-input v-model:value="pairForm.addr" placeholder="1.2.3.4:8787" />
         </a-form-item>
         <a-form-item label="设备名" name="name">
-          <a-input v-model:value="pairForm.name" :placeholder="pairRole === 'host' ? '如：家里电脑' : '如：小米14'" />
+          <a-input v-model:value="pairForm.name" :placeholder="pairRole === 'host' ? '如：家里 dsh' : '如：小米14'" />
         </a-form-item>
         <a-button type="primary" html-type="submit" :loading="issuing">生成配对码</a-button>
       </a-form>
@@ -167,7 +193,7 @@
     <a-modal v-model:open="nameModal.open" :title="nameModal.title" @ok="onNameOk" :width="420">
       <a-input
         v-model:value="nameModal.value"
-        placeholder="环境名（如：家里、公司）——同一环境可接入一台桌面桥与多台手机"
+        placeholder="环境名（如：家里、公司）——同一环境可接入一个主端与多台手机"
         @press-enter="onNameOk"
       />
     </a-modal>
@@ -419,6 +445,51 @@ async function onDelete(record: RoomDevice) {
   color: var(--app-text-muted);
   border: 1px dashed var(--app-border);
   border-radius: var(--app-radius);
+}
+/* 空态：分步接入引导 */
+.guide {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 8px 4px;
+}
+.guide-step {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.guide-no {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: var(--app-text-muted);
+  background: var(--app-fill-quaternary, rgba(0, 0, 0, 0.06));
+}
+.guide-no.on {
+  color: #fff;
+  background: var(--app-primary);
+}
+.guide-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.guide-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.guide-desc {
+  max-width: 520px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--app-text-secondary);
+  margin-bottom: 6px;
 }
 /* 空态：卡片内引导式（图标 + 标题 + 说明 + 主操作） */
 .dev-empty {
