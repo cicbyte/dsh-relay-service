@@ -56,11 +56,19 @@ interface ApiResp<T = unknown> {
 }
 
 function forceLogout() {
+  if (loggingOut) return // 并发 401 只登出一次
+  loggingOut = true
   tokenStore.clear()
   if (!location.pathname.startsWith('/login')) {
+    message.warning('登录已过期，请重新登录')
     location.href = '/login'
   }
 }
+let loggingOut = false
+
+/** 登录/刷新自身的 401 是「凭据错误」而非「会话过期」：不走无感刷新与登出跳转，交调用方报错。 */
+const AUTH_PATHS = ['/api/auth/login', '/api/auth/refresh']
+const isAuthPath = (url = '') => AUTH_PATHS.some((p) => url.includes(p))
 
 // ---------------------------------------------------------------------------
 // 401 无感刷新（单飞）
@@ -96,7 +104,14 @@ async function retryWithRefresh(config: AxiosRequestConfig): Promise<AxiosRespon
     forceLogout()
     return Promise.reject(new Error('登录已过期'))
   }
-  const accessToken = await refreshAccessToken()
+  let accessToken: string
+  try {
+    accessToken = await refreshAccessToken()
+  } catch {
+    // refresh 也过期/被吊销：整体登出并跳登录页（否则页面原地卡死）
+    forceLogout()
+    return Promise.reject(new Error('登录已过期'))
+  }
   const headers = Object.assign({}, config.headers, {
     Authorization: `Bearer ${accessToken}`,
     'X-Retried': '1',
@@ -131,6 +146,7 @@ http.interceptors.response.use(
     }
     if (body.code === 200) return body.result as unknown as AxiosResponse
     if (body.code === 401) {
+      if (isAuthPath(config.url)) return Promise.reject(new Error(body.message || '登录失败'))
       return retryWithRefresh(config)
     }
     if (!config.skipErrorToast) message.error(body.message || `请求失败 ${body.code}`)
@@ -138,8 +154,12 @@ http.interceptors.response.use(
   },
   (error: AxiosError<ApiResp>) => {
     const config = error.config as AxiosRequestConfig & { skipErrorToast?: boolean }
-    if (error.response?.status === 401 && config) {
+    if (error.response?.status === 401 && config && !isAuthPath(config.url)) {
       return retryWithRefresh(config)
+    }
+    if (config && isAuthPath(config.url)) {
+      // 登录接口错误由登录页自行展示（防双弹）
+      return Promise.reject(new Error(error.response?.data?.message || '登录失败'))
     }
     if (!config?.skipErrorToast) {
       message.error(error.response?.data?.message || error.message || '网络异常')
