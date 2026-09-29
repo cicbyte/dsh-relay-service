@@ -18,7 +18,6 @@ const themeConfig = computed(() => {
     // 算法数组：紧凑叠加在明暗算法之上
     algorithm: app.compact ? [base, antdTheme.compactAlgorithm] : base,
     token: { colorPrimary: app.primaryColor, borderRadius: app.radius },
-    locale: zhCN,
   }
 })
 
@@ -42,7 +41,8 @@ onBeforeUnmount(() => window.removeEventListener('storage', onStorage))
 </script>
 
 <template>
-  <a-config-provider :theme="themeConfig">
+  <!-- locale 是 ConfigProvider 独立 prop（塞进 theme 对象不生效） -->
+  <a-config-provider :theme="themeConfig" :locale="zhCN">
     <router-view />
   </a-config-provider>
 </template>

@@ -22,7 +22,9 @@
             {{ r.clients.length }} 台设备 · {{ r.clientsOnline }} 在线
           </div>
         </div>
-        <a-empty v-if="!rooms.length" description="暂无环境" :image-style="{ margin: '24px 0' }" />
+        <div v-if="!rooms.length" class="list-empty">
+          还没有环境<br />点上方「新建环境」开始
+        </div>
       </div>
     </div>
 
@@ -65,13 +67,17 @@
             </a-popconfirm>
           </a-space>
         </div>
-        <a-empty v-else description="尚未配对：点击右上「Host 配对码」扫码接入">
-          <a-button type="primary" @click="openPair('host')">生成 Host 配对码</a-button>
-        </a-empty>
+        <div v-else class="dev-empty">
+          <DisconnectOutlined class="dev-empty-icon" />
+          <div class="dev-empty-title">桌面桥尚未接入</div>
+          <div class="dev-empty-desc">生成 Host 配对码，在桌面 dsh「手机通道」里填码或扫码；桥上线后此处亮起绿点</div>
+          <a-button type="primary" @click="openPair('host')"><KeyOutlined /> 生成 Host 配对码</a-button>
+        </div>
       </a-card>
 
       <a-card title="手机 / 平板（Clients）" class="sec-card">
         <a-table
+          v-if="current.clients.length"
           :data-source="current.clients"
           :columns="clientColumns"
           row-key="id"
@@ -98,13 +104,29 @@
             </template>
           </template>
         </a-table>
-        <a-empty v-if="!current.clients.length" description="暂无客户端：生成手机配对码扫码接入" />
+        <div v-if="!current.clients.length" class="dev-empty">
+          <MobileOutlined class="dev-empty-icon" />
+          <div class="dev-empty-title">还没有手机接入</div>
+          <div class="dev-empty-desc">生成手机配对码，家人用 dsh 手机 App 扫码即连（也可在桌面桥设置页生成）</div>
+          <a-button @click="openPair('client')"><MobileOutlined /> 生成手机配对码</a-button>
+        </div>
       </a-card>
     </div>
-    <a-empty v-else class="env-empty" description="左侧选择或新建一个环境" />
+    <div v-else class="env-hero">
+      <CloudServerOutlined class="hero-icon" />
+      <h2 class="hero-title">{{ rooms.length ? '选择一个环境' : '还没有环境' }}</h2>
+      <p class="hero-desc">
+        {{ rooms.length
+          ? '从左侧列表选择环境，查看接入状态与配对码。'
+          : '环境 = 一台桌面 + 多台手机。创建后生成配对码，桌面桥与手机扫码即可接入。' }}
+      </p>
+      <a-button v-if="!rooms.length" type="primary" size="large" @click="onCreateEnv">
+        <PlusOutlined /> 新建环境
+      </a-button>
+    </div>
 
     <!-- 出码 + 二维码 -->
-    <a-modal v-model:open="pairOpen" :title="pairRole === 'host' ? 'Host 配对码' : '手机配对码'" :footer="null" width="560">
+    <a-modal v-model:open="pairOpen" :title="pairRole === 'host' ? 'Host 配对码' : '手机配对码'" :footer="null" :width="560">
       <a-form layout="vertical" :model="pairForm" @finish="onIssue">
         <a-form-item label="中继地址（手机可达的 relay 地址）" name="addr">
           <a-input v-model:value="pairForm.addr" placeholder="1.2.3.4:8787" />
@@ -132,7 +154,7 @@
     </a-modal>
 
     <!-- 环境命名 -->
-    <a-modal v-model:open="nameModal.open" :title="nameModal.title" @ok="onNameOk" width="420">
+    <a-modal v-model:open="nameModal.open" :title="nameModal.title" @ok="onNameOk" :width="420">
       <a-input
         v-model:value="nameModal.value"
         placeholder="环境名（如：家里、公司）——同一环境可接入一台桌面桥与多台手机"
@@ -146,7 +168,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
-  DesktopOutlined, DisconnectOutlined, EditOutlined, KeyOutlined,
+  CloudServerOutlined, DesktopOutlined, DisconnectOutlined, EditOutlined, KeyOutlined,
   MobileOutlined, PlusOutlined,
 } from '@ant-design/icons-vue'
 import QRCode from 'qrcode'
@@ -351,9 +373,69 @@ async function onDelete(record: RoomDevice) {
   flex-direction: column;
   gap: 16px;
 }
-.env-empty {
+/* 空态：左列表紧凑提示 */
+.list-empty {
+  margin-top: 12px;
+  padding: 16px 12px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 2;
+  color: var(--app-text-muted);
+  border: 1px dashed var(--app-border);
+  border-radius: var(--app-radius);
+}
+/* 空态：卡片内引导式（图标 + 标题 + 说明 + 主操作） */
+.dev-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 16px;
+  text-align: center;
+}
+.dev-empty-icon {
+  font-size: 36px;
+  color: var(--app-text-muted);
+}
+.dev-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.dev-empty-desc {
+  max-width: 380px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--app-text-secondary);
+  margin-bottom: 8px;
+}
+/* 空态：右侧首屏 hero（无环境/未选择） */
+.env-hero {
   flex: 1;
-  padding-top: 80px;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  background: var(--app-card-bg);
+  border: 1px dashed var(--app-border);
+  border-radius: var(--app-radius);
+  padding: 40px 24px;
+}
+.hero-icon {
+  font-size: 56px;
+  color: color-mix(in srgb, var(--app-primary) 55%, var(--app-text-muted));
+}
+.hero-title {
+  margin: 0;
+  font-size: 20px;
+}
+.hero-desc {
+  margin: 0 0 12px;
+  max-width: 420px;
+  color: var(--app-text-secondary);
+  line-height: 1.8;
 }
 .head-row {
   display: flex;
