@@ -2,8 +2,8 @@
 
 use relay_common::util::now_secs;
 use relay_common::{AppError, AppState};
-use relay_entity::{device, room};
-use sea_orm::{ActiveModelTrait, EntityTrait, Insert, IntoActiveModel, Set};
+use relay_entity::{device, pairing_code, room};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Insert, IntoActiveModel, QueryFilter, Set};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -96,6 +96,28 @@ pub async fn rename(
     am.display_name = Set(Some(display_name.trim().to_string()));
     am.update(&state.db).await?;
     Ok(())
+}
+
+/// 删除环境：踢线全部在线连接，连带删设备与未用配对码（审计由 oplog 中间件落）
+pub async fn remove(state: &AppState, room_id: &str) -> Result<bool, AppError> {
+    if room::Entity::find_by_id(room_id)
+        .one(&state.db)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    state.hub.kick_room(room_id);
+    device::Entity::delete_many()
+        .filter(device::Column::Room.eq(room_id))
+        .exec(&state.db)
+        .await?;
+    pairing_code::Entity::delete_many()
+        .filter(pairing_code::Column::Room.eq(room_id))
+        .exec(&state.db)
+        .await?;
+    room::Entity::delete_by_id(room_id).exec(&state.db).await?;
+    Ok(true)
 }
 
 /// 环境列表（含 host/client 分组与实时在线态）

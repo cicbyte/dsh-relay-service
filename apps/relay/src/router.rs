@@ -33,7 +33,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/auth/password", post(handlers::auth::change_password))
         .route("/api/status", get(handlers::status::overview))
         .route("/api/rooms", get(handlers::rooms::list).post(handlers::rooms::create))
-        .route("/api/rooms/{room}", axum::routing::put(handlers::rooms::rename))
+        .route("/api/rooms/{room}", axum::routing::put(handlers::rooms::rename).delete(handlers::rooms::remove))
         .route("/api/devices", get(handlers::devices::list))
         .route("/api/devices/{id}/revoke", post(handlers::devices::revoke))
         .route("/api/devices/{id}/rotate", post(handlers::devices::rotate))

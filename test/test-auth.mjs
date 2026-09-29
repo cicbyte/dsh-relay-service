@@ -239,6 +239,26 @@ async function main() {
 
   host2.terminate(); c1.terminate(); t1.ws.terminate();
 
+  console.log('== 7. 删除环境（连带设备、踢线） ==');
+  const env2 = await api('/api/rooms', at, { method: 'POST', body: { displayName: '待删环境' } });
+  const DEL_ROOM = env2.result?.room;
+  check('新建待删环境', env2.code === 200 && DEL_ROOM?.length === 8, JSON.stringify(env2).slice(0, 120));
+  const dp = await api('/api/pairing-codes', at, { method: 'POST', body: { role: 'host', name: 'del-bridge', room: DEL_ROOM } });
+  const delJoin = await wsHello({ type: 'hello', role: 'host', pairingCode: dp.result?.code, name: 'del-bridge' });
+  check('待删环境 host 在线', delJoin.frame.type === 'welcome' && delJoin.frame.room === DEL_ROOM, JSON.stringify(delJoin.frame).slice(0, 120));
+  const delKick = waitFor(delJoin.ws, (f) => f.type === 'bye').catch(() => null);
+  const del = await api(`/api/rooms/${DEL_ROOM}`, at, { method: 'DELETE' });
+  check('删除环境 200', del.code === 200, JSON.stringify(del));
+  const delBye = await Promise.race([delKick, new Promise((r) => setTimeout(() => r(null), 3000))]);
+  check('在线连接即时踢线（bye）', delBye?.type === 'bye', JSON.stringify(delBye));
+  const gone = await wsHello({ type: 'hello', role: 'host', deviceId: delJoin.frame.device?.id, token: delJoin.frame.device?.token, name: 'x' });
+  check('环境内设备随删失效', gone.frame.type === 'reject', JSON.stringify(gone.frame).slice(0, 80));
+  gone.ws.terminate();
+  const rooms3 = await api('/api/rooms', at);
+  check('环境列表已无该环境', !(rooms3.result || []).some((r) => r.room === DEL_ROOM), JSON.stringify(rooms3.result).slice(0, 160));
+  const delAgain = await api(`/api/rooms/${DEL_ROOM}`, at, { method: 'DELETE' });
+  check('重复删除 404', delAgain.code === 404, JSON.stringify(delAgain));
+
   console.log(`\n结果: ${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);
 }

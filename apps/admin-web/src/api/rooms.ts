@@ -34,3 +34,8 @@ export function createRoom(displayName: string) {
 export function renameRoom(room: string, displayName: string) {
   return request<void>({ url: `/api/rooms/${room}`, method: 'put', data: { displayName } })
 }
+
+/** 删除环境（连带删设备与配对码，在线连接即时踢线） */
+export function removeRoom(room: string) {
+  return request<void>({ url: `/api/rooms/${room}`, method: 'delete' })
+}

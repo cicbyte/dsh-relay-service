@@ -265,6 +265,26 @@ impl WsHub {
         n
     }
 
+    /// 踢掉某房间全部在线连接（删环境用），返回踢到的连接数
+    pub fn kick_room(&self, room: &str) -> usize {
+        let targets: Vec<WsTx> = self
+            .conns
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.room == room)
+            .map(|c| c.tx.clone())
+            .collect();
+        let n = targets.len();
+        for tx in targets {
+            let _ = tx.try_send(WsOut::Text(
+                serde_json::json!({ "type": "bye", "code": "revoked" }).to_string(),
+            ));
+            let _ = tx.try_send(WsOut::Close);
+        }
+        n
+    }
+
     pub fn device_online(&self, device_id: &str) -> bool {
         self.conns
             .lock()

@@ -42,3 +42,15 @@ pub async fn rename(
     relay_service::room::rename(&state, &room, &body.display_name).await?;
     Ok(Json(Resp::ok_empty()))
 }
+
+/// 删除环境（连带删设备与配对码，在线连接即时踢线）
+pub async fn remove(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+) -> Result<Json<Resp<()>>, AppError> {
+    if !relay_service::room::remove(&state, &room).await? {
+        return Err(AppError::not_found("环境不存在"));
+    }
+    tracing::info!(room = %room, "环境已删除");
+    Ok(Json(Resp::ok_empty()))
+}

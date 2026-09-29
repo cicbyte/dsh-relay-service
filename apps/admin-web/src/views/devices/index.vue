@@ -6,22 +6,32 @@
         <PlusOutlined /> 新建环境
       </a-button>
       <div class="env-scroll">
-        <div
-          v-for="r in rooms"
-          :key="r.room"
-          class="env-item"
-          :class="{ active: r.room === selectedRoom }"
-          @click="selectedRoom = r.room"
-        >
-          <div class="env-name">
-            <span class="dot" :class="{ on: r.hostOnline }" />
-            {{ r.displayName }}
+        <a-dropdown v-for="r in rooms" :key="r.room" :trigger="['contextmenu']">
+          <div
+            class="env-item"
+            :class="{ active: r.room === selectedRoom }"
+            @click="selectedRoom = r.room"
+          >
+            <div class="env-name">
+              <span class="dot" :class="{ on: r.hostOnline }" />
+              {{ r.displayName }}
+            </div>
+            <div class="env-meta">
+              <DesktopOutlined v-if="r.hostOnline" /> <DisconnectOutlined v-else />
+              {{ r.clients.length }} 台设备 · {{ r.clientsOnline }} 在线
+            </div>
           </div>
-          <div class="env-meta">
-            <DesktopOutlined v-if="r.hostOnline" /> <DisconnectOutlined v-else />
-            {{ r.clients.length }} 台设备 · {{ r.clientsOnline }} 在线
-          </div>
-        </div>
+          <template #overlay>
+            <a-menu @click="({ key }: any) => onCtxMenu(String(key), r)">
+              <a-menu-item key="rename"><EditOutlined /> 重命名</a-menu-item>
+              <a-menu-item key="pair-host"><KeyOutlined /> 生成 Host 配对码</a-menu-item>
+              <a-menu-item key="pair-client"><MobileOutlined /> 生成手机配对码</a-menu-item>
+              <a-menu-item key="copy-id"><CopyOutlined /> 复制环境 ID</a-menu-item>
+              <a-menu-divider />
+              <a-menu-item key="delete" danger><DeleteOutlined /> 删除环境</a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
         <div v-if="!rooms.length" class="list-empty">
           还没有环境<br />点上方「新建环境」开始
         </div>
@@ -168,13 +178,13 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
-  CloudServerOutlined, DesktopOutlined, DisconnectOutlined, EditOutlined, KeyOutlined,
-  MobileOutlined, PlusOutlined,
+  CloudServerOutlined, CopyOutlined, DeleteOutlined, DesktopOutlined, DisconnectOutlined,
+  EditOutlined, KeyOutlined, MobileOutlined, PlusOutlined,
 } from '@ant-design/icons-vue'
 import QRCode from 'qrcode'
 import { fmtDateTime } from '@/utils/format'
 import type { RoomDevice, RoomView } from '@/api/rooms'
-import { createRoom, listRooms, renameRoom } from '@/api/rooms'
+import { createRoom, listRooms, removeRoom, renameRoom } from '@/api/rooms'
 import { issuePairing } from '@/api/pairing'
 import { deleteDevice, revokeDevice, rotateDevice } from '@/api/devices'
 
@@ -210,6 +220,32 @@ function onRename() {
   nameModal.title = '重命名环境'
   nameModal.value = current.value?.displayName ?? ''
   nameModal.open = true
+}
+
+/** 环境卡片右键菜单 */
+function onCtxMenu(key: string, r: RoomView) {
+  selectedRoom.value = r.room // 菜单动作作用于右键的环境
+  if (key === 'rename') onRename()
+  else if (key === 'pair-host') openPair('host')
+  else if (key === 'pair-client') openPair('client')
+  else if (key === 'copy-id') copyText(r.room)
+  else if (key === 'delete') onDeleteEnv(r)
+}
+
+function onDeleteEnv(r: RoomView) {
+  Modal.confirm({
+    title: `删除环境「${r.displayName}」？`,
+    content: '将连带删除该环境的全部设备与未用配对码，在线连接立即断开，操作不可恢复。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      await removeRoom(r.room)
+      message.success('环境已删除')
+      if (selectedRoom.value === r.room) selectedRoom.value = ''
+      await load()
+    },
+  })
 }
 
 async function onNameOk() {
