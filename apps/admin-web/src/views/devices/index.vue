@@ -165,7 +165,13 @@
     <a-modal v-model:open="pairOpen" :title="pairRole === 'host' ? 'dsh 配对码' : '手机配对码'" :footer="null" :width="560">
       <a-form layout="vertical" :model="pairForm" @finish="onIssue">
         <a-form-item label="中继地址（手机可达的 relay 地址）" name="addr">
-          <a-input v-model:value="pairForm.addr" placeholder="1.2.3.4:8787" />
+          <div v-if="!addrEditing" class="addr-auto">
+            <b>{{ displayAddr }}</b>
+            <a-tag color="green">自动获取</a-tag>
+            <a-button type="link" size="small" @click="addrEditing = true">修改</a-button>
+          </div>
+          <a-input v-else v-model:value="pairForm.addr" placeholder="1.2.3.4:8787" />
+          <div class="addr-hint">按访问地址自动推导；手机访问不到时再改成公网/局域网地址</div>
         </a-form-item>
         <a-form-item label="设备名" name="name">
           <a-input v-model:value="pairForm.name" :placeholder="pairRole === 'host' ? '如：家里 dsh' : '如：小米14'" />
@@ -212,6 +218,7 @@ import { fmtDateTime } from '@/utils/format'
 import type { RoomDevice, RoomView } from '@/api/rooms'
 import { createRoom, listRooms, removeRoom, renameRoom } from '@/api/rooms'
 import { issuePairing } from '@/api/pairing'
+import { getOverview } from '@/api/status'
 import { deleteDevice, revokeDevice, rotateDevice } from '@/api/devices'
 
 const rooms = ref<RoomView[]>([])
@@ -293,7 +300,30 @@ async function onNameOk() {
 // ---- 出码 + QR ----
 const pairOpen = ref(false)
 const pairRole = ref<'host' | 'client'>('client')
-const pairForm = reactive({ addr: `${window.location.hostname}:8787`, name: '' })
+const pairForm = reactive({ addr: '', name: '' })
+const addrEditing = ref(false)
+const suggestAddr = ref('')
+
+/** 中继地址自动推导：优先访问域名；本机回环访问时改用服务端出网网卡地址 */
+async function loadSuggest() {
+  if (suggestAddr.value) return
+  const pageHost = window.location.hostname
+  const loopback = !pageHost || pageHost === '127.0.0.1' || pageHost === 'localhost' || pageHost === '::1' || pageHost === '[::1]'
+  let host = pageHost
+  let port = 8787
+  try {
+    const ov = await getOverview()
+    port = ov.wsPort || port
+    if (loopback) host = ov.lanAddr || host
+  } catch {}
+  suggestAddr.value = `${host}:${port}`
+}
+
+const displayAddr = computed(() => {
+  const raw = pairForm.addr || suggestAddr.value
+  if (!raw) return '获取中…'
+  return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${raw.replace(/^wss?:\/\//, '')}`
+})
 const pairCode = ref('')
 const qrDataUrl = ref('')
 
@@ -320,7 +350,11 @@ function openPair(role: 'host' | 'client') {
   pairForm.name = ''
   pairCode.value = ''
   qrDataUrl.value = ''
+  addrEditing.value = false
   pairOpen.value = true
+  loadSuggest().then(() => {
+    if (!addrEditing.value) pairForm.addr = suggestAddr.value
+  })
 }
 
 const issuing = ref(false)
@@ -445,6 +479,17 @@ async function onDelete(record: RoomDevice) {
   color: var(--app-text-muted);
   border: 1px dashed var(--app-border);
   border-radius: var(--app-radius);
+}
+/* 出码弹窗：中继地址自动获取行 */
+.addr-auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.addr-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-muted);
 }
 /* 空态：分步接入引导 */
 .guide {

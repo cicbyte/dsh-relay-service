@@ -131,6 +131,7 @@ async function main() {
 
   const st = await api('/api/status', at);
   check('概览统计', st.code === 200 && typeof st.result?.devicesTotal === 'number', JSON.stringify(st.result));
+  check('中继地址提示（wsPort + lanAddr）', typeof st.result?.wsPort === 'number' && !!st.result?.lanAddr, JSON.stringify(st.result).slice(0, 160));
   const health = await api('/api/health/detail');
   check('健康检查', health.code === 200 && health.result?.db === 'ok', JSON.stringify(health.result));
 

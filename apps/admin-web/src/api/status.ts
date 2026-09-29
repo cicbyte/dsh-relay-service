@@ -15,6 +15,9 @@ export interface Overview {
   authMode: string
   listenWs: string
   listenAdmin: string
+  /** 中继地址提示：WS 端口 + 服务端出网网卡地址（出码弹窗自动推导用） */
+  wsPort: number
+  lanAddr: string
 }
 
 export interface HealthDetail {

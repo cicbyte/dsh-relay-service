@@ -33,6 +33,19 @@ pub struct Overview {
     pub auth_mode: String,
     pub listen_ws: String,
     pub listen_admin: String,
+    /// 中继地址提示：WS 端口 + 服务端出网网卡地址（出码弹窗自动推导用）
+    pub ws_port: u16,
+    pub lan_addr: String,
+}
+
+/// 出网网卡地址（UDP connect 不发包，仅选路由）；失败回退 127.0.0.1
+fn lan_addr() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            Ok(s.local_addr()?.ip().to_string())
+        })
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 pub async fn detail(state: &AppState) -> Result<HealthDetail, AppError> {
@@ -82,5 +95,7 @@ pub async fn overview(state: &AppState) -> Result<Overview, AppError> {
         auth_mode: state.config.ws.auth_mode.clone(),
         listen_ws: format!("{}:{}", state.config.ws.host, state.config.ws.port),
         listen_admin: format!("{}:{}", state.config.server.host, state.config.server.port),
+        ws_port: state.config.ws.port,
+        lan_addr: lan_addr(),
     })
 }
