@@ -144,7 +144,7 @@ const firstChar = computed(() => displayName.value.slice(0, 1).toUpperCase())
       <a-menu
         :key="menuEpoch"
         mode="inline"
-        :theme="appStore.isDark ? 'dark' : 'dark'"
+        :theme="appStore.isDark ? 'dark' : 'light'"
         :items="menuItems"
         v-model:selected-keys="selectedKeys"
         v-model:open-keys="openKeys"
