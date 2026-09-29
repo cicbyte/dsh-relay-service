@@ -40,7 +40,7 @@ function connect() {
   ws = new WebSocket(RELAY_URL, 'dsh-relay-v1');
 
   ws.on('open', () => {
-    reconnectDelay = 1000;
+    // 退避重置移到 welcome：open 即重置是 1/s 重连风暴根因（限流活锁喂养者）
     send({ type: 'hello', role: 'host', code: RELAY_CODE });
     console.log('[bridge] connected to relay');
   });
@@ -54,6 +54,7 @@ function connect() {
     }
     switch (frame.type) {
       case 'welcome':
+        reconnectDelay = 1000;
         console.log(`[bridge] welcomed (peerOnline=${frame.peerOnline})`);
         return;
       case 'ping':
@@ -77,6 +78,10 @@ function connect() {
         return handleWsClose(frame);
       case 'reject':
         console.error(`[bridge] rejected: ${frame.code}`);
+        if (frame.code === 'rate-limited') {
+          // 限流：长退避 + 尊重 retryAfterSecs（严禁 1/s 喂养限流窗口成活锁）
+          reconnectDelay = Math.max(reconnectDelay, (Number(frame.retryAfterSecs) || 0) * 1000, 30_000);
+        }
         return;
       default:
         return;

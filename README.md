@@ -87,6 +87,11 @@ S→C  reject {code} | peer {online, clients:[...]} | bye {code}
   `X-Device-id`）——host 设备可为自家房间签发 `role=client` 配对码，家人免管理台入网。
 - reject 码：`auth-required` / `bad-token` / `revoked` / `unknown-device` / `role-mismatch` /
   `room-mismatch` / `pairing-invalid|expired|used|burned` / `rate-limited` / `bad-hello|role|code`。
+- **限流与退避**（防 1/s 重连风暴活锁）：hello 失败按 IP 计数（60s 窗 / 10 次），窗口内封禁；
+  `rate-limited` 拒绝附 `retryAfterSecs`，客户端**必须**按它退避（≥30s 兜底）；
+  退避计时只在 `welcome` 后重置（open 即重置是风暴根因）。
+  限速门只拦「猜凭据」路径（配对码/无凭据/旧共享码）；已注册设备持 `deviceId+token`
+  的重连放行（失败照样计数）——防同 IP 失败风暴把有效设备饿死。
 - 背压：出站队列 64 条，溢出踢线（`bye{overflow}`）。relay 不解析业务载荷。
 
 ### 扫码入网 payload（二维码规范）

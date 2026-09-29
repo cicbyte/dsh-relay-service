@@ -85,6 +85,14 @@ impl RateLimiter {
     fn reset(&self, ip: &str) {
         self.fails.lock().unwrap().remove(ip);
     }
+
+    /// 距窗口解除的剩余秒数（供 reject.retryAfterSecs 提示客户端退避）
+    fn retry_after(&self, ip: &str) -> i64 {
+        let m = self.fails.lock().unwrap();
+        m.get(ip)
+            .map(|(_, start)| (start + WINDOW_SECS - now_secs()).max(1))
+            .unwrap_or(1)
+    }
 }
 
 /// 房间 key：共享配对码 SHA-256 的前 4 字节 hex（hex8）
@@ -101,6 +109,12 @@ fn json_text(v: &Value) -> String {
 fn reject_msg(code: &str) -> String {
     tracing::warn!(reject = %code, "拒绝连接");
     json_text(&json!({ "type": "reject", "code": code }))
+}
+
+/// 限流拒绝：附 retryAfterSecs 提示（客户端据此退避，防 1/s 重连风暴把窗口喂成活锁）
+fn reject_rate_limited(retry_after_secs: i64) -> String {
+    tracing::warn!(reject = "rate-limited", retryAfterSecs = retry_after_secs, "拒绝连接");
+    json_text(&json!({ "type": "reject", "code": "rate-limited", "retryAfterSecs": retry_after_secs }))
 }
 
 fn bye_msg(code: &str) -> String {
@@ -186,9 +200,14 @@ async fn handle(
         return Err("bad-role".into());
     };
     let code = hv.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    if rate.blocked(&ip) {
+    // 限速只拦「猜凭据」路径（配对码/无凭据/旧共享码）；已注册设备的令牌重连放行——
+    // 否则同 IP 的失败风暴（负向探测/多套件连跑/同 NAT）会把有效设备一起饿死成活锁。
+    // 令牌 128-bit 熵不可暴力枚举，其失败照样计数（fail）。
+    let has_device_token = !hv.get("token").and_then(|v| v.as_str()).unwrap_or("").is_empty()
+        && !hv.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").is_empty();
+    if !has_device_token && rate.blocked(&ip) {
         let _ = sink
-            .send(Message::Text(reject_msg("rate-limited")))
+            .send(Message::Text(reject_rate_limited(rate.retry_after(&ip))))
             .await;
         return Err("rate-limited".into());
     }
