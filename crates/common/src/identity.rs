@@ -5,4 +5,12 @@ use serde::Serialize;
 pub struct AdminIdentity {
     pub user_id: i64,
     pub username: String,
+    /// 角色：admin=全局管理 | user=仅自己的环境（权限矩阵写死，见 service 层钩子）
+    pub role: String,
+}
+
+impl AdminIdentity {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
 }

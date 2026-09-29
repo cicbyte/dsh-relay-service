@@ -14,6 +14,10 @@ export interface RoomView {
   room: string
   displayName: string
   createdAt: number
+  /** 归属用户（0=未归属） */
+  ownerId: number
+  /** 归属用户名 */
+  ownerName: string
   hostOnline: boolean
   clientsOnline: number
   host: RoomDevice | null

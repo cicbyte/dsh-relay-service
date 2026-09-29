@@ -24,8 +24,9 @@ declare module 'axios' {
 const TOKEN_KEY = 'dsh-relay.accessToken'
 const REFRESH_KEY = 'dsh-relay.refreshToken'
 const USER_KEY = 'dsh-relay.username'
+const ROLE_KEY = 'dsh-relay.role'
 
-export { TOKEN_KEY, REFRESH_KEY, USER_KEY }
+export { TOKEN_KEY, REFRESH_KEY, USER_KEY, ROLE_KEY }
 
 export const tokenStore = {
   get access() {
@@ -37,15 +38,21 @@ export const tokenStore = {
   get username() {
     return localStorage.getItem(USER_KEY) ?? ''
   },
-  save(accessToken: string, refreshToken: string, username: string) {
+  /** 角色：admin | user（权限矩阵写死在后端，前端只做展示裁剪） */
+  get role() {
+    return localStorage.getItem(ROLE_KEY) ?? ''
+  },
+  save(accessToken: string, refreshToken: string, username: string, role = '') {
     localStorage.setItem(TOKEN_KEY, accessToken)
     localStorage.setItem(REFRESH_KEY, refreshToken)
     localStorage.setItem(USER_KEY, username)
+    localStorage.setItem(ROLE_KEY, role)
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(REFRESH_KEY)
     localStorage.removeItem(USER_KEY)
+    localStorage.removeItem(ROLE_KEY)
   },
 }
 
@@ -89,7 +96,7 @@ function refreshAccessToken(): Promise<string> {
       if (data.code !== 200 || !data.result?.accessToken) {
         throw new Error(data.message || '刷新失败')
       }
-      tokenStore.save(data.result.accessToken, data.result.refreshToken, tokenStore.username)
+      tokenStore.save(data.result.accessToken, data.result.refreshToken, tokenStore.username, tokenStore.role)
       return data.result.accessToken
     })().finally(() => {
       refreshing = null

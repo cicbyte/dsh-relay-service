@@ -4,11 +4,15 @@ export interface TokenPair {
   accessToken: string
   refreshToken: string
   username: string
+  /** admin | user */
+  role: string
 }
 
 export interface ProfileResult {
   userId: number
   username: string
+  /** admin | user */
+  role: string
 }
 
 /** 登录 */

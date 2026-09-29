@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, h, ref, watch, type Component } from 'vue'
+import { computed, h, reactive, ref, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   DashboardOutlined, SettingOutlined, LogoutOutlined, HomeOutlined,
   DownOutlined, SkinOutlined, MenuOutlined,
-  MobileOutlined, KeyOutlined, FileSearchOutlined, ApiOutlined,
+  MobileOutlined, KeyOutlined, FileSearchOutlined, ApiOutlined, TeamOutlined, SafetyOutlined,
 } from '@ant-design/icons-vue'
 import { SunIcon, MoonIcon } from '@/components/ThemeIcons'
 import { useAuthStore } from '@/store/auth'
+import { changePassword } from '@/api/auth'
+import { message } from 'ant-design-vue'
 import { useTabsStore } from '@/store/tabs'
 import { useAppStore } from '@/store/app'
 import TabsView from './TabsView.vue'
@@ -22,7 +24,7 @@ import type { ItemType } from 'ant-design-vue/es/menu'
  */
 const ICONS: Record<string, Component> = {
   DashboardOutlined, SettingOutlined, MobileOutlined, KeyOutlined,
-  FileSearchOutlined, ApiOutlined,
+  FileSearchOutlined, ApiOutlined, TeamOutlined,
 }
 
 const route = useRoute()
@@ -36,6 +38,7 @@ interface AntMenuItem {
   key: string
   label: string
   icon?: unknown
+  adminOnly?: boolean
   children?: AntMenuItem[]
 }
 
@@ -59,11 +62,21 @@ const MENU: AntMenuItem[] = [
     icon: () => h(ICONS.SettingOutlined),
     children: [
       { key: '/audit', label: '审计日志', icon: () => h(ICONS.FileSearchOutlined) },
+      { key: '/users', label: '用户管理', icon: () => h(ICONS.TeamOutlined), adminOnly: true },
     ],
   },
 ]
 
-const menuItems = computed<ItemType[]>(() => MENU as unknown as ItemType[])
+/** 角色裁剪：adminOnly 项只对管理员展示（真实权限后端写死） */
+const menuItems = computed<ItemType[]>(() =>
+  MENU.map((top) => {
+    if (!top.children) return top
+    return {
+      ...top,
+      children: top.children.filter((c) => !c.adminOnly || auth.role === 'admin'),
+    }
+  }).filter((top) => !top.children || top.children.length > 0) as unknown as ItemType[],
+)
 
 // ---------- 侧边栏 ----------
 const collapsed = ref(false)
@@ -123,6 +136,43 @@ async function onLogout() {
 
 const displayName = computed(() => auth.username || 'admin')
 const firstChar = computed(() => displayName.value.slice(0, 1).toUpperCase())
+
+// 旧版本会话无 role：启动补全（菜单/守卫据此裁剪）
+auth.hydrate()
+
+// ---------- 修改密码（改后其他端下线，本端回登录页） ----------
+const pwdOpen = ref(false)
+const pwdSaving = ref(false)
+const pwd = reactive({ old: '', next: '', confirm: '' })
+
+function openPwdModal() {
+  pwd.old = ''
+  pwd.next = ''
+  pwd.confirm = ''
+  pwdOpen.value = true
+}
+
+async function onChangePassword() {
+  if (pwd.next.length < 8) {
+    message.warning('新密码至少 8 位')
+    return
+  }
+  if (pwd.next !== pwd.confirm) {
+    message.warning('两次输入的新密码不一致')
+    return
+  }
+  pwdSaving.value = true
+  try {
+    await changePassword(pwd.old, pwd.next)
+    message.success('密码已修改，请重新登录')
+    pwdOpen.value = false
+    await auth.logout()
+    tabsStore.reset()
+    router.push('/login')
+  } finally {
+    pwdSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -187,6 +237,12 @@ const firstChar = computed(() => displayName.value.slice(0, 1).toUpperCase())
             </div>
             <template #overlay>
               <a-menu>
+                <a-menu-item key="role" disabled>
+                  {{ auth.role === 'admin' ? '管理员' : '普通用户' }} · {{ displayName }}
+                </a-menu-item>
+                <a-menu-item key="password" @click="openPwdModal">
+                  <SafetyOutlined /> 修改密码
+                </a-menu-item>
                 <a-menu-item key="logout" @click="onLogout">
                   <LogoutOutlined /> 退出登录
                 </a-menu-item>
@@ -209,6 +265,22 @@ const firstChar = computed(() => displayName.value.slice(0, 1).toUpperCase())
   </a-layout>
 
   <SettingsDrawer v-model:open="settingsOpen" />
+
+  <a-modal v-model:open="pwdOpen" title="修改密码" :width="420" :footer="null">
+    <a-form layout="vertical" @finish="onChangePassword">
+      <a-form-item label="原密码" required>
+        <a-input-password v-model:value="pwd.old" />
+      </a-form-item>
+      <a-form-item label="新密码" required>
+        <a-input-password v-model:value="pwd.next" placeholder="至少 8 位" />
+      </a-form-item>
+      <a-form-item label="确认新密码" required>
+        <a-input-password v-model:value="pwd.confirm" />
+      </a-form-item>
+      <a-button type="primary" html-type="submit" :loading="pwdSaving" block>确认修改</a-button>
+      <div class="pwd-tip">修改后其他已登录端将全部下线，需重新登录</div>
+    </a-form>
+  </a-modal>
 </template>
 
 <style scoped>
@@ -348,6 +420,11 @@ const firstChar = computed(() => displayName.value.slice(0, 1).toUpperCase())
   background: var(--app-hover-bg);
 }
 
+.pwd-tip {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
 .user-avatar {
   background: var(--app-primary);
   font-weight: 600;

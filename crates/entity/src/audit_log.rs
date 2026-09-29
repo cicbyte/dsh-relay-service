@@ -11,6 +11,8 @@ pub struct Model {
     pub event: String,
     pub ip: String,
     pub device: Option<String>,
+    /// 操作人/环境归属人（admin_users.id；0=系统/未知，仅管理员可见）
+    pub user_id: i64,
     /// JSON 文本
     pub detail: String,
 }

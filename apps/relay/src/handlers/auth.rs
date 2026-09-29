@@ -63,6 +63,7 @@ pub async fn profile(
     Json(Resp::ok(ProfileOutput {
         user_id: identity.user_id,
         username: identity.username,
+        role: identity.role,
     }))
 }
 

@@ -6,3 +6,4 @@ pub mod device;
 pub mod health;
 pub mod pairing;
 pub mod room;
+pub mod users;

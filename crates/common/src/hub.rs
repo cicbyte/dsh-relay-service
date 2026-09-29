@@ -300,4 +300,27 @@ impl WsHub {
         let clients = rooms.values().map(|s| s.clients.len()).sum();
         (rooms.len(), hosts, clients)
     }
+
+    /// 限定房间集合的 (rooms, hosts, clients)（多用户概览按归属裁剪）
+    pub fn stats_scoped(
+        &self,
+        owned: &std::collections::HashSet<String>,
+    ) -> (usize, usize, usize) {
+        let conns = self.conns.lock().unwrap();
+        let mut rooms = std::collections::HashSet::new();
+        let mut hosts = 0usize;
+        let mut clients = 0usize;
+        for c in conns.values() {
+            if !owned.contains(&c.room) {
+                continue;
+            }
+            rooms.insert(c.room.clone());
+            if c.role == "host" {
+                hosts += 1;
+            } else {
+                clients += 1;
+            }
+        }
+        (rooms.len(), hosts, clients)
+    }
 }

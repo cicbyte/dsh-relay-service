@@ -297,6 +297,7 @@ async fn handle(
         "conn.open",
         &ip,
         Some(&device_id),
+        relay_service::room::owner_of(&state, &room).await,
         json!({ "role": role_s, "room": room, "auth": auth_tag }),
     )
     .await;
@@ -404,6 +405,7 @@ async fn handle(
         "conn.close",
         &ip,
         Some(&device_id),
+        relay_service::room::owner_of(&state, &room).await,
         json!({ "role": role.str(), "room": room }),
     )
     .await;

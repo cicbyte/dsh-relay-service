@@ -7,6 +7,7 @@ use sea_orm_migration::MigratorTrait;
 
 mod m20260601_000001_init;
 mod m20260602_000001_rooms;
+mod m20260603_000001_multiuser;
 
 pub struct Migrator;
 
@@ -16,6 +17,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260601_000001_init::Migration),
             Box::new(m20260602_000001_rooms::Migration),
+            Box::new(m20260603_000001_multiuser::Migration),
         ]
     }
 }
@@ -61,6 +63,7 @@ async fn seed_admin(db: &DatabaseConnection) -> Result<(), DbErr> {
     let now = chrono::Utc::now().timestamp();
     let row = admin_user::ActiveModel {
         username: Set("admin".to_string()),
+        role: Set("admin".to_string()),
         password_hash: Set(hash),
         refresh_nonce: Set(String::new()),
         created_at: Set(now),

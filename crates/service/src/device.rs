@@ -1,10 +1,13 @@
 //! 设备注册：列表 / 吊销（即时踢线）/ 轮换令牌 / 删除 / WS 侧令牌校验
 
+use relay_common::identity::AdminIdentity;
 use relay_common::AppError;
 use relay_common::AppState;
 use relay_common::util::{now_secs, rand_hex};
 use relay_entity::device;
-use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -102,13 +105,42 @@ pub async fn touch(state: &AppState, device_id: &str) {
     }
 }
 
-pub async fn list(state: &AppState) -> Result<Vec<DeviceView>, AppError> {
+/// 设备归属访问校验（经环境归属）：admin 全通；user 仅自己环境的设备；其余 404
+pub async fn ensure_device_access(
+    state: &AppState,
+    id: &AdminIdentity,
+    device_id: &str,
+) -> Result<relay_entity::device::Model, AppError> {
+    let dev = relay_entity::device::Entity::find_by_id(device_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| AppError::not_found("设备不存在"))?;
+    if !id.is_admin() && crate::room::owner_of(state, &dev.room).await != id.user_id {
+        return Err(AppError::not_found("设备不存在"));
+    }
+    Ok(dev)
+}
+
+pub async fn list(state: &AppState, id: &AdminIdentity) -> Result<Vec<DeviceView>, AppError> {
+    // 归属过滤：user 只见自己环境下的设备
+    let owned: std::collections::HashSet<String> = if id.is_admin() {
+        Default::default()
+    } else {
+        relay_entity::room::Entity::find()
+            .filter(relay_entity::room::Column::OwnerId.eq(id.user_id))
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .map(|r| r.room)
+            .collect()
+    };
     let rows = device::Entity::find()
         .order_by_desc(device::Column::CreatedAt)
         .all(&state.db)
         .await?;
     Ok(rows
         .into_iter()
+        .filter(|d| id.is_admin() || owned.contains(&d.room))
         .map(|d| {
             let online = state.hub.device_online(&d.id);
             DeviceView {

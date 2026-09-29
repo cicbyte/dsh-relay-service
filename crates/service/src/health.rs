@@ -1,7 +1,7 @@
 //! 健康检查 + 概览统计
 
 use relay_common::{AppError, AppState};
-use relay_entity::{device, pairing_code};
+use relay_entity::{device, pairing_code, room};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
@@ -62,26 +62,47 @@ pub async fn detail(state: &AppState) -> Result<HealthDetail, AppError> {
     })
 }
 
-pub async fn overview(state: &AppState) -> Result<Overview, AppError> {
-    use sea_orm::PaginatorTrait;
-    let devices_total = device::Entity::find().count(&state.db).await?;
-    let devices_revoked = device::Entity::find()
-        .filter(device::Column::Revoked.eq(true))
-        .count(&state.db)
-        .await?;
-    let online = device::Entity::find()
-        .all(&state.db)
-        .await?
-        .into_iter()
-        .filter(|d| state.hub.device_online(&d.id))
+/// 运行概览（多用户按归属裁剪：admin 全量，user 只统计自己的环境）
+pub async fn overview(
+    state: &AppState,
+    id: &relay_common::identity::AdminIdentity,
+) -> Result<Overview, AppError> {
+    let owned: std::collections::HashSet<String> = if id.is_admin() {
+        Default::default()
+    } else {
+        room::Entity::find()
+            .filter(room::Column::OwnerId.eq(id.user_id))
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .map(|r| r.room)
+            .collect()
+    };
+    let scoped = |r: &str| id.is_admin() || owned.contains(r);
+    let devices = device::Entity::find().all(&state.db).await?;
+    let devices_total = devices.iter().filter(|d| scoped(&d.room)).count() as u64;
+    let devices_revoked = devices
+        .iter()
+        .filter(|d| scoped(&d.room) && d.revoked)
+        .count() as u64;
+    let online = devices
+        .iter()
+        .filter(|d| scoped(&d.room) && state.hub.device_online(&d.id))
         .count() as u64;
     let now = relay_common::util::now_secs();
     let pairing_active = pairing_code::Entity::find()
         .filter(pairing_code::Column::UsedBy.is_null())
         .filter(pairing_code::Column::ExpiresAt.gt(now))
-        .count(&state.db)
-        .await?;
-    let (rooms, hosts, clients) = state.hub.stats();
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .filter(|p| scoped(p.room.as_deref().unwrap_or_default()))
+        .count() as u64;
+    let (rooms, hosts, clients) = if id.is_admin() {
+        state.hub.stats()
+    } else {
+        state.hub.stats_scoped(&owned)
+    };
     Ok(Overview {
         devices_total,
         devices_online: online,

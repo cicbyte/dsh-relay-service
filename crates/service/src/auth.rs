@@ -14,6 +14,7 @@ pub struct LoginOutput {
     pub access_token: String,
     pub refresh_token: String,
     pub username: String,
+    pub role: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -21,6 +22,7 @@ pub struct LoginOutput {
 pub struct ProfileOutput {
     pub user_id: i64,
     pub username: String,
+    pub role: String,
 }
 
 /// 登录：bcrypt 校验 → 签发 access/refresh（refresh 绑定 nonce）
@@ -50,6 +52,7 @@ pub async fn login(
     Ok(LoginOutput {
         access_token: access,
         refresh_token: refresh,
+        role: user.role.clone(),
         username: user.username,
     })
 }
@@ -76,6 +79,7 @@ pub async fn refresh(state: &AppState, refresh_token: &str) -> Result<LoginOutpu
     Ok(LoginOutput {
         access_token: access,
         refresh_token: refresh,
+        role: user.role.clone(),
         username: user.username,
     })
 }
@@ -129,5 +133,6 @@ pub async fn resolve_admin_token(
     Ok(AdminIdentity {
         user_id: user.id,
         username: user.username,
+        role: user.role,
     })
 }

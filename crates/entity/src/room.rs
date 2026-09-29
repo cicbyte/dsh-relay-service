@@ -9,6 +9,8 @@ pub struct Model {
     pub room: String,
     /// 环境显示名（如「家里」「公司」）
     pub display_name: Option<String>,
+    /// 归属用户（admin_users.id；0=未归属，仅管理员可见）
+    pub owner_id: i64,
     pub created_at: i64,
 }
 

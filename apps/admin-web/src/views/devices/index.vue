@@ -49,7 +49,10 @@
                 <EditOutlined /> 重命名
               </a-button>
             </h2>
-            <div class="env-sub">环境 ID {{ current.room }} · 创建于 {{ fmtDateTime(current.createdAt) }}</div>
+            <div class="env-sub">
+              环境 ID {{ current.room }} · 创建于 {{ fmtDateTime(current.createdAt) }}
+              <template v-if="isAdmin"> · 归属 {{ current.ownerName || '未归属' }}</template>
+            </div>
           </div>
           <a-space>
             <a-button type="primary" @click="openPair('host')"><KeyOutlined /> dsh 配对码</a-button>
@@ -217,6 +220,7 @@ import QRCode from 'qrcode'
 import { fmtDateTime } from '@/utils/format'
 import type { RoomDevice, RoomView } from '@/api/rooms'
 import { createRoom, listRooms, removeRoom, renameRoom } from '@/api/rooms'
+import { tokenStore } from '@/utils/request'
 import { issuePairing } from '@/api/pairing'
 import { getOverview } from '@/api/status'
 import { deleteDevice, revokeDevice, rotateDevice } from '@/api/devices'
@@ -225,6 +229,7 @@ const rooms = ref<RoomView[]>([])
 const selectedRoom = ref('')
 
 const current = computed(() => rooms.value.find((r) => r.room === selectedRoom.value) ?? null)
+const isAdmin = computed(() => tokenStore.role === 'admin')
 
 const clientColumns = [
   { title: '设备', dataIndex: 'name', key: 'name', ellipsis: true },

@@ -40,6 +40,12 @@ pub fn build(state: AppState) -> Router {
         .route("/api/devices/{id}", delete(handlers::devices::remove))
         .route("/api/pairing-codes", post(handlers::pairing::issue))
         .route("/api/audit", get(handlers::audit::tail))
+        .route("/api/users", get(handlers::users::list).post(handlers::users::create))
+        .route(
+            "/api/users/{id}/password",
+            axum::routing::put(handlers::users::reset_password),
+        )
+        .route("/api/users/{id}", axum::routing::delete(handlers::users::remove))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             relay_middleware::oplog::oplog,

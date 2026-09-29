@@ -2,26 +2,34 @@
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::Json;
+use axum::{Extension, Json};
+use relay_common::identity::AdminIdentity;
 use relay_common::{AppError, AppState, Resp};
 use relay_service::pairing::PairingView;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct PairingReq {
-    /// host（桌面桥）| client（手机）
+    /// host（dsh）| client（手机）
     pub role: String,
     #[serde(default)]
     pub name: String,
-    /// 绑定环境（room hex8，来自管理台环境视图；空=不绑）
+    /// 绑定环境（room hex8，来自管理台环境视图；空=不绑，仅管理员可出）
     #[serde(default)]
     pub room: String,
 }
 
 pub async fn issue(
     State(state): State<AppState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<PairingReq>,
 ) -> Result<Json<Resp<PairingView>>, AppError> {
+    if body.room.is_empty() {
+        // 不绑环境的 legacy 码会绕开归属隔离：仅管理员可出
+        relay_service::users::require_admin(&identity)?;
+    } else {
+        relay_service::room::ensure_room_access(&state, &identity, &body.room).await?;
+    }
     let out = relay_service::pairing::issue(&state, &body.role, &body.name, &body.room).await?;
     tracing::info!(role = %out.role, name = %out.name, room = %out.room, "签发配对码");
     Ok(Json(Resp::ok(out)))
@@ -62,6 +70,7 @@ pub async fn device_invite(
         "admin.op",
         "",
         Some(&dev.id),
+        relay_service::room::owner_of(&state, &dev.room).await,
         serde_json::json!({ "op": "device.invite", "name": out.name, "room": out.room }),
     )
     .await;

@@ -1,7 +1,7 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// 管理账号（当前单管理员；password 存 bcrypt，refresh_nonce 做刷新轮转）
+/// 管理账号（多用户；password 存 bcrypt，refresh_nonce 做刷新轮转）
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "admin_users")]
 pub struct Model {
@@ -9,6 +9,8 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub username: String,
+    /// 角色：admin=全局管理 | user=仅自己的环境（权限矩阵写死代码）
+    pub role: String,
     pub password_hash: String,
     /// 刷新令牌轮转 nonce（刷新时更新，旧 refresh 立即失效）
     pub refresh_nonce: String,
