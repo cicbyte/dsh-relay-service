@@ -16,11 +16,13 @@ pub struct LoginReq {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RefreshReq {
     pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChangePasswordReq {
     pub old_password: String,
     pub new_password: String,

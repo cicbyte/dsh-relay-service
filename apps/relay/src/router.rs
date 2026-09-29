@@ -18,7 +18,6 @@ pub fn build(state: AppState) -> Router {
         ));
 
     let mut public = Router::new()
-        .route("/", get(handlers::page::console))
         .route("/api/health", get(handlers::health::simple))
         .route("/api/health/detail", get(handlers::health::detail))
         .merge(auth_public);
@@ -47,13 +46,29 @@ pub fn build(state: AppState) -> Router {
             relay_middleware::admin_auth::admin_auth,
         ));
 
-    public
+    let app = public
         .merge(protected)
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(30),
         ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(state)
+        .layer(tower_http::cors::CorsLayer::permissive());
+
+    // 管理台前端：ServeDir 托管 apps/admin-web/dist（SPA fallback 到 index.html）；
+    // 未构建时降级为提示页
+    let static_dir = state.config.server.static_dir.clone();
+    let index = std::path::Path::new(&static_dir).join("index.html");
+    let app = if index.exists() {
+        tracing::info!(dir = %static_dir, "管理台前端已挂载（SPA）");
+        app.fallback_service(
+            tower_http::services::ServeDir::new(&static_dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        )
+    } else {
+        tracing::warn!(dir = %static_dir, "管理台前端未构建，降级为提示页（cd apps/admin-web && npm run build）");
+        app.fallback(handlers::page::fallback)
+    };
+
+    app.with_state(state)
 }

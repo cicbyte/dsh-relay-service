@@ -9,6 +9,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, Query
 use serde::Serialize;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LoginOutput {
     pub access_token: String,
     pub refresh_token: String,
@@ -16,6 +17,7 @@ pub struct LoginOutput {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileOutput {
     pub user_id: i64,
     pub username: String,

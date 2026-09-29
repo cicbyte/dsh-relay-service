@@ -11,6 +11,7 @@ use subtle::ConstantTimeEq;
 
 /// 设备视图（带实时在线状态）
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceView {
     pub id: String,
     pub name: String,

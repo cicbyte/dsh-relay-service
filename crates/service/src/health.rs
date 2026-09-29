@@ -6,6 +6,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct WsStats {
     pub rooms: usize,
     pub hosts: usize,
@@ -13,6 +14,7 @@ pub struct WsStats {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthDetail {
     pub status: String,
     pub version: String,
@@ -21,6 +23,7 @@ pub struct HealthDetail {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Overview {
     pub devices_total: u64,
     pub devices_online: u64,

@@ -1,0 +1,27 @@
+{
+  "name": "dsh-relay-admin-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-relay 管理台前端（Vue3 + Ant Design Vue，参考 byte-admin admin-web）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
+    "ant-design-vue": "^4.2.6",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.23",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "~5.6.3",
+    "vite": "^6.4.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

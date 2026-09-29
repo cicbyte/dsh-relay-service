@@ -24,6 +24,8 @@ pub struct ServerConfig {
     pub trust_proxy: bool,
     /// 是否暴露 OpenAPI 文档（生产建议 false）
     pub swagger: bool,
+    /// 管理台前端静态目录（apps/admin-web 的构建产物；缺省时降级为提示页）
+    pub static_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,7 @@ impl Default for ServerConfig {
             port: 8788,
             trust_proxy: false,
             swagger: true,
+            static_dir: "apps/admin-web/dist".to_string(),
         }
     }
 }
@@ -157,6 +160,9 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var(format!("{env_prefix}_DATABASE_URL")) {
             cfg.database.url = v;
+        }
+        if let Ok(v) = std::env::var(format!("{env_prefix}_STATIC_DIR")) {
+            cfg.server.static_dir = v;
         }
         if let Ok(v) = std::env::var("JWT_SECRET") {
             cfg.jwt.secret = v;

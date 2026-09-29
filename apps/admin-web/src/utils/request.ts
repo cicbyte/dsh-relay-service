@@ -1,0 +1,155 @@
+import axios, {
+  type AxiosInstance,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+  type AxiosError,
+} from 'axios'
+import { message } from 'ant-design-vue'
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 请求失败时不弹全局错误提示 */
+    skipErrorToast?: boolean
+  }
+}
+
+/**
+ * 统一请求封装（对齐 byte-admin utils/request）：
+ * - 自动附加 Authorization: Bearer <accessToken>
+ * - 归一后端响应 {code, result, message}：成功返回 result
+ * - 401 无感刷新：refreshToken 调 /api/auth/refresh 后重放原请求（一次）；
+ *   并发 401 共享同一次刷新（单飞），防 nonce 轮转语义下互相踢出
+ */
+
+const TOKEN_KEY = 'dsh-relay.accessToken'
+const REFRESH_KEY = 'dsh-relay.refreshToken'
+const USER_KEY = 'dsh-relay.username'
+
+export { TOKEN_KEY, REFRESH_KEY, USER_KEY }
+
+export const tokenStore = {
+  get access() {
+    return localStorage.getItem(TOKEN_KEY) ?? ''
+  },
+  get refresh() {
+    return localStorage.getItem(REFRESH_KEY) ?? ''
+  },
+  get username() {
+    return localStorage.getItem(USER_KEY) ?? ''
+  },
+  save(accessToken: string, refreshToken: string, username: string) {
+    localStorage.setItem(TOKEN_KEY, accessToken)
+    localStorage.setItem(REFRESH_KEY, refreshToken)
+    localStorage.setItem(USER_KEY, username)
+  },
+  clear() {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(REFRESH_KEY)
+    localStorage.removeItem(USER_KEY)
+  },
+}
+
+interface ApiResp<T = unknown> {
+  code: number
+  result?: T
+  message: string
+}
+
+function forceLogout() {
+  tokenStore.clear()
+  if (!location.pathname.startsWith('/login')) {
+    location.href = '/login'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 401 无感刷新（单飞）
+// ---------------------------------------------------------------------------
+
+let refreshing: Promise<string> | null = null
+
+function refreshAccessToken(): Promise<string> {
+  if (!refreshing) {
+    refreshing = (async () => {
+      const rt = tokenStore.refresh
+      if (!rt) throw new Error('无刷新令牌')
+      // 裸 axios：不走 http 实例，避免拦截器递归
+      const { data } = await axios.post<ApiResp<{ accessToken: string; refreshToken: string }>>(
+        '/api/auth/refresh',
+        { refreshToken: rt },
+      )
+      if (data.code !== 200 || !data.result?.accessToken) {
+        throw new Error(data.message || '刷新失败')
+      }
+      tokenStore.save(data.result.accessToken, data.result.refreshToken, tokenStore.username)
+      return data.result.accessToken
+    })().finally(() => {
+      refreshing = null
+    })
+  }
+  return refreshing
+}
+
+async function retryWithRefresh(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  const retried = (config.headers as Record<string, unknown> | undefined)?.['X-Retried']
+  if (!tokenStore.refresh || retried) {
+    forceLogout()
+    return Promise.reject(new Error('登录已过期'))
+  }
+  const accessToken = await refreshAccessToken()
+  const headers = Object.assign({}, config.headers, {
+    Authorization: `Bearer ${accessToken}`,
+    'X-Retried': '1',
+  })
+  return http.request({ ...config, headers })
+}
+
+// ---------------------------------------------------------------------------
+// 请求实例
+// ---------------------------------------------------------------------------
+
+const http: AxiosInstance = axios.create({
+  baseURL: '/',
+  timeout: 15000,
+})
+
+http.interceptors.request.use((config) => {
+  const token = tokenStore.access
+  if (token && !config.headers.Authorization) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+http.interceptors.response.use(
+  (response) => {
+    const config = response.config
+    const body = response.data as ApiResp
+    if (response.status !== 200 || typeof body?.code !== 'number') {
+      if (!config.skipErrorToast) message.error('响应异常')
+      return Promise.reject(new Error('响应异常'))
+    }
+    if (body.code === 200) return body.result as unknown as AxiosResponse
+    if (body.code === 401) {
+      return retryWithRefresh(config)
+    }
+    if (!config.skipErrorToast) message.error(body.message || `请求失败 ${body.code}`)
+    return Promise.reject(new Error(body.message || `请求失败 ${body.code}`))
+  },
+  (error: AxiosError<ApiResp>) => {
+    const config = error.config as AxiosRequestConfig & { skipErrorToast?: boolean }
+    if (error.response?.status === 401 && config) {
+      return retryWithRefresh(config)
+    }
+    if (!config?.skipErrorToast) {
+      message.error(error.response?.data?.message || error.message || '网络异常')
+    }
+    return Promise.reject(error)
+  },
+)
+
+export function request<T = unknown>(config: AxiosRequestConfig): Promise<T> {
+  return http.request(config) as Promise<T>
+}
+
+export default http

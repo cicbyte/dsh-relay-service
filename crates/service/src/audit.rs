@@ -7,6 +7,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditView {
     pub id: i64,
     pub ts: i64,

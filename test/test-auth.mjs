@@ -57,15 +57,15 @@ async function main() {
   const bad = await api('/api/auth/login', null, { method: 'POST', body: { username: 'admin', password: 'wrong' } });
   check('错误密码 401', bad.code === 401, JSON.stringify(bad));
   const login = await api('/api/auth/login', null, { method: 'POST', body: { username: 'admin', password: 'test-admin-pw-123' } });
-  check('登录成功发令牌', login.code === 200 && !!login.result?.access_token, JSON.stringify(login).slice(0, 120));
-  const at = login.result?.access_token, rt = login.result?.refresh_token;
+  check('登录成功发令牌', login.code === 200 && !!login.result?.accessToken, JSON.stringify(login).slice(0, 120));
+  const at = login.result?.accessToken, rt = login.result?.refreshToken;
 
   const noAuth = await api('/api/devices');
   check('无令牌 401（fail-closed）', noAuth.code === 401, JSON.stringify(noAuth));
 
-  const refreshed = await api('/api/auth/refresh', null, { method: 'POST', body: { refresh_token: rt } });
-  check('refresh 轮转成功', refreshed.code === 200 && !!refreshed.result?.refresh_token);
-  const oldRefresh = await api('/api/auth/refresh', null, { method: 'POST', body: { refresh_token: rt } });
+  const refreshed = await api('/api/auth/refresh', null, { method: 'POST', body: { refreshToken: rt } });
+  check('refresh 轮转成功', refreshed.code === 200 && !!refreshed.result?.refreshToken);
+  const oldRefresh = await api('/api/auth/refresh', null, { method: 'POST', body: { refreshToken: rt } });
   check('旧 refresh 立即失效', oldRefresh.code === 401, JSON.stringify(oldRefresh));
 
   console.log('== 2. 配对 + 令牌重连 ==');
@@ -128,7 +128,7 @@ async function main() {
   check('审计含 admin.op（oplog）', events.includes('admin.op'), JSON.stringify(events.slice(0, 8)));
 
   const st = await api('/api/status', at);
-  check('概览统计', st.code === 200 && typeof st.result?.devices_total === 'number', JSON.stringify(st.result));
+  check('概览统计', st.code === 200 && typeof st.result?.devicesTotal === 'number', JSON.stringify(st.result));
   const health = await api('/api/health/detail');
   check('健康检查', health.code === 200 && health.result?.db === 'ok', JSON.stringify(health.result));
 

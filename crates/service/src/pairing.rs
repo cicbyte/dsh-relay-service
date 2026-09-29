@@ -32,6 +32,7 @@ impl PairErr {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PairingView {
     pub code: String,
     pub role: String,
