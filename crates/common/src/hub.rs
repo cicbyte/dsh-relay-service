@@ -1,11 +1,13 @@
 //! WS 连接枢纽：房间（room=hex8，一 host : N client）+ 连接登记 + 路由/踢线/在线统计。
 //! - host 一房一个：后到踢先到（superseded）
 //! - client 多台共存：仅「同一设备」重连挤占自己的旧连接，不同设备互不影响
-//! - 每连接分配短标识 cid：host→client 的帧以 `cid.` 前缀重写 rid 做回程路由
-//!   （rid 对桥/手机不透明，wire 协议零改动）
-//! 数据面转发逻辑在 apps/relay/ws.rs，这里只做连接拓扑与路由。
+//! - cid 为设备稳定短标识（stable_cid）：host→client 的帧以 `cid.` 前缀重写 rid 做回程路由
+//!   （rid 对桥/手机不透明，wire 协议零改动）；跨重连不变是隧道续传的前提
+//! - 每目的地环形缓冲（buf_*）：隧道帧带 seq 落环，hello.resumeFrom 断点回放（续传）
+//! 数据面转发逻辑在 apps/relay/ws.rs，这里只做连接拓扑、路由与续传缓冲。
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -20,9 +22,80 @@ pub enum WsOut {
 
 pub type WsTx = mpsc::Sender<WsOut>;
 
+/// 续传回放判定
+pub enum Replay {
+    /// 断点之后的帧（按 seq 升序）
+    Frames(Vec<String>),
+    /// 断点不可满足（环已绕回/服务重启）：端点应放弃旧流重建
+    Reset,
+}
+
+/// 稳定 cid：设备维度跨重连不变（FNV-1a 64 → 16 hex）
+pub fn stable_cid(device_id: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in device_id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// 续传缓冲键：host 目的地
+pub fn buf_key_host(room: &str) -> String {
+    format!("{room}\u{0}h")
+}
+
+/// 续传缓冲键：client 目的地（cid 稳定）
+pub fn buf_key_client(room: &str, cid: &str) -> String {
+    format!("{room}\u{0}c\u{0}{cid}")
+}
+
+const BUF_MAX_FRAMES: usize = 256;
+const BUF_MAX_BYTES: usize = 128 * 1024;
+const BUF_TTL_SECS: i64 = 30;
+
+struct SeqRing {
+    /// (seq, ts, frame)；seq 从 1 起连续分配
+    items: VecDeque<(u64, i64, String)>,
+    bytes: usize,
+    next_seq: u64,
+}
+
+impl SeqRing {
+    fn new() -> Self {
+        Self {
+            items: VecDeque::new(),
+            bytes: 0,
+            next_seq: 1,
+        }
+    }
+
+    fn evict(&mut self, now: i64) {
+        while let Some(&(seq, ts, _)) = self.items.front() {
+            let over = self.items.len() > BUF_MAX_FRAMES
+                || self.bytes > BUF_MAX_BYTES
+                || now - ts > BUF_TTL_SECS;
+            if !over {
+                break;
+            }
+            if let Some((_, _, f)) = self.items.pop_front() {
+                self.bytes -= f.len();
+            }
+            let _ = seq;
+        }
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 pub struct JoinOutcome {
     pub id: u64,
-    /// 连接短标识（rid 回程路由前缀），全局唯一
+    /// 连接短标识（rid 回程路由前缀）：设备稳定，跨重连不变
     pub cid: String,
     /// 对端在线：client 看 host；host 看是否有 client
     pub peer_online: bool,
@@ -50,6 +123,8 @@ pub struct WsHub {
     next_id: AtomicU64,
     conns: Mutex<HashMap<u64, Conn>>,
     rooms: Mutex<HashMap<String, Slots>>,
+    /// 续传缓冲：dest key → 环形帧队列
+    bufs: Mutex<HashMap<String, SeqRing>>,
 }
 
 fn peer_msg(online: bool, clients: usize) -> WsOut {
@@ -64,6 +139,7 @@ impl WsHub {
             next_id: AtomicU64::new(1),
             conns: Mutex::new(HashMap::new()),
             rooms: Mutex::new(HashMap::new()),
+            bufs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -71,7 +147,12 @@ impl WsHub {
     /// 对端上线通知（peer 帧）由本方法直接下发。
     pub fn join(&self, room: &str, role: &str, device_id: &str, tx: WsTx) -> JoinOutcome {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cid = format!("{:04x}{:02x}", id & 0xffff, (id >> 16) & 0xff);
+        // 设备维度稳定 cid（无设备标识的连接退回每连接随机）
+        let cid = if device_id.is_empty() {
+            format!("{:04x}{:02x}", id & 0xffff, (id >> 16) & 0xff)
+        } else {
+            stable_cid(device_id)
+        };
         self.conns.lock().unwrap().insert(
             id,
             Conn {
@@ -322,5 +403,68 @@ impl WsHub {
             }
         }
         (rooms.len(), hosts, clients)
+    }
+
+    // ---- 续传缓冲（隧道帧 seq 落环，断点回放） ----
+
+    /// 分配下一 seq（帧内注入后调 buf_push 落环）
+    pub fn buf_alloc(&self, dest: &str) -> u64 {
+        let mut bufs = self.bufs.lock().unwrap();
+        let ring = bufs.entry(dest.to_string()).or_insert_with(SeqRing::new);
+        let seq = ring.next_seq;
+        ring.next_seq += 1;
+        seq
+    }
+
+    /// 帧落环（调用方负责 seq 与帧内容一致）
+    pub fn buf_push(&self, dest: &str, seq: u64, frame: String) {
+        let mut bufs = self.bufs.lock().unwrap();
+        let ring = bufs.entry(dest.to_string()).or_insert_with(SeqRing::new);
+        let now = now_secs();
+        ring.bytes += frame.len();
+        ring.items.push_back((seq, now, frame));
+        ring.evict(now);
+    }
+
+    /// 断点回放：since=端点已处理的最大 seq（0=从未收到）
+    pub fn buf_replay(&self, dest: &str, since: u64) -> Replay {
+        let mut bufs = self.bufs.lock().unwrap();
+        let now = now_secs();
+        let Some(ring) = bufs.get_mut(dest) else {
+            // 无环：从未发过帧（干净起点）或服务已重启（有历史断点）
+            return if since == 0 {
+                Replay::Frames(Vec::new())
+            } else {
+                Replay::Reset
+            };
+        };
+        ring.evict(now);
+        let last = ring.next_seq - 1;
+        if since > last {
+            // 端点比服务还超前：seq 已被重启重置
+            return Replay::Reset;
+        }
+        let frames: Vec<String> = ring
+            .items
+            .iter()
+            .filter(|(s, _, _)| *s > since)
+            .map(|(_, _, f)| f.clone())
+            .collect();
+        let first = ring.items.iter().find(|(s, _, _)| *s > since).map(|(s, _, _)| *s);
+        match first {
+            // 断点之后第一帧必须正好衔接，否则中间有洞（环已绕回）
+            Some(s) if s == since + 1 => Replay::Frames(frames),
+            None if since == last => Replay::Frames(Vec::new()),
+            _ => Replay::Reset,
+        }
+    }
+
+    /// 房间删除时清掉相关续传缓冲（级联删用户环境用）
+    pub fn buf_clear_room(&self, room: &str) {
+        let prefix = format!("{room}\u{0}");
+        self.bufs
+            .lock()
+            .unwrap()
+            .retain(|k, _| !k.starts_with(&prefix));
     }
 }

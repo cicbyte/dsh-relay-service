@@ -31,9 +31,34 @@ let ws = null;
 let closed = false;
 let reconnectDelay = 1000;
 const tunnels = new Map(); // rid → WebSocket
+// v3 续传/批量：已处理最大 seq、relay batch 能力、出站合并队列
+let lastSeq = 0;
+let relayBatch = false;
+let outbox = [];
+let outboxTimer = null;
 
 function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (outbox.length >= 2048) {
+    console.error('[bridge] 断线缓冲溢出，重建隧道');
+    outbox.length = 0;
+    closeAllTunnels('relay-offline-overflow');
+  }
+  outbox.push(JSON.stringify(obj));
+  if (outboxTimer) return;
+  outboxTimer = setImmediate(() => {
+    outboxTimer = null;
+    flushOutbox();
+  });
+}
+
+function flushOutbox() {
+  if (!outbox.length || !(ws && ws.readyState === WebSocket.OPEN)) return;
+  const frames = outbox.splice(0, outbox.length);
+  if (relayBatch && frames.length > 1) {
+    ws.send(JSON.stringify({ type: 'batch', frames }));
+  } else {
+    for (const f of frames) ws.send(f);
+  }
 }
 
 function connect() {
@@ -41,7 +66,8 @@ function connect() {
 
   ws.on('open', () => {
     // 退避重置移到 welcome：open 即重置是 1/s 重连风暴根因（限流活锁喂养者）
-    send({ type: 'hello', role: 'host', code: RELAY_CODE });
+    // hello 直发（outbox 是断线期积压，排在 hello 前会被 bad-hello）
+    ws.send(JSON.stringify({ type: 'hello', role: 'host', code: RELAY_CODE, batch: true, resumeFrom: lastSeq }));
     console.log('[bridge] connected to relay');
   });
 
@@ -52,55 +78,73 @@ function connect() {
     } catch {
       return;
     }
-    switch (frame.type) {
-      case 'welcome':
-        reconnectDelay = 1000;
-        console.log(`[bridge] welcomed (peerOnline=${frame.peerOnline})`);
-        return;
-      case 'ping':
-        send({ type: 'pong', t: frame.t });
-        return;
-      case 'bye':
-        console.log(`[bridge] relay bye: ${frame.code}`);
-        ws.close();
-        return;
-      case 'peer':
-        console.log(`[bridge] phone ${frame.online ? 'online' : 'offline'}`);
-        if (!frame.online) closeAllTunnels('peer-offline');
-        return;
-      case 'http-req':
-        return handleHttp(frame);
-      case 'ws-open':
-        return handleWsOpen(frame);
-      case 'ws-frame':
-        return handleWsFrame(frame);
-      case 'ws-close':
-        return handleWsClose(frame);
-      case 'reject':
-        console.error(`[bridge] rejected: ${frame.code}`);
-        if (frame.code === 'rate-limited') {
-          // 限流：长退避 + 尊重 retryAfterSecs（严禁 1/s 喂养限流窗口成活锁）
-          reconnectDelay = Math.max(reconnectDelay, (Number(frame.retryAfterSecs) || 0) * 1000, 30_000);
-        }
-        return;
-      default:
-        return;
-    }
+    handleFrame(frame);
   });
 
   ws.on('close', () => {
-    for (const [rid, t] of tunnels) {
-      try {
-        t.close();
-      } catch {}
-      tunnels.delete(rid);
-    }
+    // v3 续传：断线不拆隧道——本地 WS 继续收进 outbox，重连 flush/回放无缝续流
     if (closed) return;
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
-    console.log('[bridge] relay disconnected, reconnecting...');
+    console.log('[bridge] relay disconnected, reconnecting (tunnels kept)...');
   });
   ws.on('error', (e) => console.error('[bridge] ws error:', e.message));
+}
+
+function handleFrame(frame) {
+  switch (frame.type) {
+    case 'welcome':
+      reconnectDelay = 1000;
+      relayBatch = !!frame.batch;
+      console.log(`[bridge] welcomed (peerOnline=${frame.peerOnline})`);
+      flushOutbox();
+      return;
+    case 'batch':
+      for (const s of frame.frames || []) {
+        try {
+          handleFrame(JSON.parse(s));
+        } catch {}
+      }
+      return;
+    case 'resume':
+      if (!frame.ok) {
+        console.log(`[bridge] resume reset (${frame.reason || 'gap'})，重建隧道`);
+        outbox.length = 0;
+        closeAllTunnels('resume-reset');
+      } else {
+        console.log(`[bridge] resumed (replayed=${frame.count ?? 0})`);
+      }
+      return;
+    case 'ping':
+      send({ type: 'pong', t: frame.t });
+      return;
+    case 'bye':
+      console.log(`[bridge] relay bye: ${frame.code}`);
+      ws.close();
+      return;
+    case 'peer':
+      console.log(`[bridge] phone ${frame.online ? 'online' : 'offline'}`);
+      if (!frame.online) closeAllTunnels('peer-offline');
+      return;
+    case 'http-req':
+    case 'ws-open':
+    case 'ws-frame':
+    case 'ws-close':
+      if (Number.isInteger(frame.seq) && frame.seq > lastSeq) lastSeq = frame.seq;
+      if (frame.type === 'http-req') return handleHttp(frame);
+      if (frame.type === 'ws-open') return handleWsOpen(frame);
+      if (frame.type === 'ws-frame') return handleWsFrame(frame);
+      return handleWsClose(frame);
+    case 'reject':
+      console.error(`[bridge] rejected: ${frame.code}`);
+      if (frame.code === 'rate-limited') {
+        // 限流：长退避 + 尊重 retryAfterSecs（严禁 1/s 喂养限流窗口成活锁）
+        reconnectDelay = Math.max(reconnectDelay, (Number(frame.retryAfterSecs) || 0) * 1000, 30_000);
+      }
+      return;
+    default:
+      return;
+  }
 }
 
 async function handleHttp(frame) {

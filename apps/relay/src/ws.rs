@@ -2,6 +2,8 @@
 //! 数据面协议与历史版本保持兼容：hello/welcome/reject/peer/bye 与
 //! http-req/http-res/ws-open/ws-frame/ws-close/error 中继帧不变；
 //! v2 增加 hello 的 deviceId+token / pairingCode 字段与 welcome.device。
+//! v3 增量（可选能力，老端零感知）：hello.resumeFrom + resume 判定帧（断点回放续传）、
+//! hello.batch + batch 信封（小帧合并）、隧道帧 seq 字段（每目的地递增）。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
-use relay_common::hub::WsOut;
+use relay_common::hub::{buf_key_client, buf_key_host, Replay, WsOut};
 use relay_common::util::now_secs;
 use relay_common::AppState;
 
@@ -200,6 +202,10 @@ async fn handle(
         return Err("bad-role".into());
     };
     let code = hv.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    // v3 可选能力：断点续传（resumeFrom=已处理最大 seq）与批量帧接收（batch）
+    let resume_from = hv.get("resumeFrom").and_then(|v| v.as_u64());
+    let want_batch = hv.get("batch").and_then(|v| v.as_bool()).unwrap_or(false);
+    let continuity = resume_from.is_some();
     // 限速只拦「猜凭据」路径（配对码/无凭据/旧共享码）；已注册设备的令牌重连放行——
     // 否则同 IP 的失败风暴（负向探测/多套件连跑/同 NAT）会把有效设备一起饿死成活锁。
     // 令牌 128-bit 熵不可暴力枚举，其失败照样计数（fail）。
@@ -295,6 +301,7 @@ async fn handle(
         "clients": join.clients,
         "room": room,
         "auth": auth_tag,
+        "batch": true,
     });
     if let Some((id, token)) = pair_issued.as_ref() {
         welcome["device"] = json!({ "id": id, "token": token });
@@ -302,6 +309,35 @@ async fn handle(
     if sink.send(Message::Text(json_text(&welcome))).await.is_err() {
         state.hub.leave(join.id);
         return Err("send welcome failed".into());
+    }
+
+    // ---- 续传判定 + 断点回放（同任务直发；活帧在 rx 排队，先后序有保证） ----
+    if let Some(since) = resume_from {
+        let dest = if role_s == "client" {
+            buf_key_client(&room, &join.cid)
+        } else {
+            buf_key_host(&room)
+        };
+        let (verdict, replay_frames) = match state.hub.buf_replay(&dest, since) {
+            Replay::Frames(frames) => (
+                json!({ "type": "resume", "ok": true, "count": frames.len() }),
+                frames,
+            ),
+            Replay::Reset => (
+                json!({ "type": "resume", "ok": false, "reason": "reset" }),
+                Vec::new(),
+            ),
+        };
+        if sink.send(Message::Text(json_text(&verdict))).await.is_err() {
+            state.hub.leave(join.id);
+            return Err("send resume failed".into());
+        }
+        for f in replay_frames {
+            if sink.send(Message::Text(f)).await.is_err() {
+                state.hub.leave(join.id);
+                return Err("send replay failed".into());
+            }
+        }
     }
 
     // 被顶替连接踢线（host 一房一岗 / client 同设备重连）
@@ -336,25 +372,44 @@ async fn handle(
                         match m {
                             Message::Text(text) => {
                                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                                    // batch 信封展开（发送端合并的小帧风暴；envelope 内为 JSON 字符串）
+                                    let frames: Vec<Value> = if v.get("type").and_then(|t| t.as_str()) == Some("batch") {
+                                        v.get("frames").and_then(|f| f.as_array())
+                                            .map(|a| a.iter()
+                                                .filter_map(|x| x.as_str())
+                                                .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                                                .collect())
+                                            .unwrap_or_default()
+                                    } else {
+                                        vec![v]
+                                    };
+                                    for mut v in frames {
                                     match v.get("type").and_then(|t| t.as_str()) {
-                                        Some("hello") | Some("welcome") | Some("reject") | Some("bye") => {}
+                                        Some("hello") | Some("welcome") | Some("reject") | Some("bye") | Some("resume") => {}
                                         Some("ping") => {
                                             let _ = sink.send(Message::Text(json_text(&json!({ "type": "pong" })))).await;
                                         }
                                         Some(t) if matches!(t, "http-req" | "http-res" | "ws-open" | "ws-frame" | "ws-close" | "error") => {
                                             // rid 回程路由：client→host 加 cid 前缀；host→client 拆前缀定向
+                                            // v3：seq 注入 + 每目的地落环（断点回放续传）
                                             let rid = v.get("rid").and_then(|r| r.as_str()).unwrap_or("").to_string();
                                             if role_s == "client" {
-                                                let mut v = v;
+                                                let dest = buf_key_host(&room);
+                                                let seq = state.hub.buf_alloc(&dest);
+                                                v["seq"] = json!(seq);
                                                 v["rid"] = json!(format!("{}.{}", join.cid, rid));
                                                 let out = v.to_string();
+                                                state.hub.buf_push(&dest, seq, out.clone());
                                                 match state.hub.host_tx(&room) {
                                                     Some(host_tx) if host_tx.send(WsOut::Text(out)).await.is_ok() => {}
                                                     _ => {
-                                                        let _ = sink.send(Message::Text(json_text(&json!({
-                                                            "type": "error", "rid": rid,
-                                                            "code": "peer-offline", "message": "host offline"
-                                                        })))).await;
+                                                        // 续传模式下静默缓冲等 host 回放；老端保留快速失败
+                                                        if !continuity {
+                                                            let _ = sink.send(Message::Text(json_text(&json!({
+                                                                "type": "error", "rid": rid,
+                                                                "code": "peer-offline", "message": "host offline"
+                                                            })))).await;
+                                                        }
                                                     }
                                                 }
                                             } else {
@@ -367,9 +422,12 @@ async fn handle(
                                                 };
                                                 match cid {
                                                     Some(cid) => {
-                                                        let mut v = v;
+                                                        let dest = buf_key_client(&room, &cid);
+                                                        let seq = state.hub.buf_alloc(&dest);
+                                                        v["seq"] = json!(seq);
                                                         v["rid"] = json!(orig);
                                                         let out = v.to_string();
+                                                        state.hub.buf_push(&dest, seq, out.clone());
                                                         if let Some(ctx) = state.hub.client_tx(&room, &cid) {
                                                             let _ = ctx.send(WsOut::Text(out)).await;
                                                         }
@@ -381,6 +439,7 @@ async fn handle(
                                             }
                                         }
                                         _ => {}
+                                    }
                                     }
                                 }
                             }
@@ -394,7 +453,27 @@ async fn handle(
             out = rx.recv() => {
                 match out {
                     Some(WsOut::Text(t)) => {
-                        if sink.send(Message::Text(t)).await.is_err() {
+                        // 同刻积压合并成 batch 信封（仅对声明 batch 的对端；不加延迟）
+                        let mut texts = vec![t];
+                        let mut close_after = false;
+                        if want_batch {
+                            while texts.len() < 32 {
+                                match rx.try_recv() {
+                                    Ok(WsOut::Text(t)) => texts.push(t),
+                                    Ok(WsOut::Close) => { close_after = true; break; }
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                        let msg = if texts.len() > 1 {
+                            Message::Text(json_text(&json!({ "type": "batch", "frames": texts })))
+                        } else {
+                            Message::Text(texts.remove(0))
+                        };
+                        if sink.send(msg).await.is_err() {
+                            done = true;
+                        } else if close_after {
+                            let _ = sink.send(Message::Close(None)).await;
                             done = true;
                         }
                     }

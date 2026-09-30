@@ -16,6 +16,8 @@ pub struct AppState {
     pub jwt: JwtManager,
     pub hub: Arc<WsHub>,
     pub login_guard: Arc<LoginGuard>,
+    /// room→owner 元数据缓存（连接鉴权/审计高频读；安全敏感的令牌校验严禁走缓存）
+    pub owner_cache: Arc<OwnerCache>,
 }
 
 impl AppState {
@@ -31,7 +33,45 @@ impl AppState {
             jwt,
             hub: Arc::new(WsHub::new()),
             login_guard: Arc::new(LoginGuard::new()),
+            owner_cache: Arc::new(OwnerCache::new()),
         }
+    }
+}
+
+/// room→owner_id 缓存：写侧（删环境/级联删用户）主动失效 + 60s TTL 兜底
+pub struct OwnerCache {
+    map: Mutex<std::collections::HashMap<String, (i64, i64)>>, // room → (owner_id, expires_at)
+}
+
+impl OwnerCache {
+    const TTL_SECS: i64 = 60;
+
+    pub fn new() -> Self {
+        Self {
+            map: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    pub fn get(&self, room: &str) -> Option<i64> {
+        let m = self.map.lock().unwrap();
+        m.get(room)
+            .filter(|(_, exp)| *exp > Self::now())
+            .map(|(o, _)| *o)
+    }
+
+    pub fn put(&self, room: &str, owner_id: i64) {
+        self.map
+            .lock()
+            .unwrap()
+            .insert(room.to_string(), (owner_id, Self::now() + Self::TTL_SECS));
+    }
+
+    pub fn invalidate(&self, room: &str) {
+        self.map.lock().unwrap().remove(room);
     }
 }
 

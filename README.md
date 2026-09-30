@@ -92,6 +92,15 @@ S→C  reject {code} | peer {online, clients:[...]} | bye {code}
   退避计时只在 `welcome` 后重置（open 即重置是风暴根因）。
   限速门只拦「猜凭据」路径（配对码/无凭据/旧共享码）；已注册设备持 `deviceId+token`
   的重连放行（失败照样计数）——防同 IP 失败风暴把有效设备饿死。
+- **v3 续传与批量**（可选能力，老端零感知）：
+  - 隧道帧带 `seq`（每目的地独立递增）；relay 每目的地环形缓冲（256 帧/128KiB/30s TTL）。
+  - `hello.resumeFrom=<已处理最大 seq>` → `resume{ok:true,count}` + 断点回放（同任务直发，
+    序有保证）；断点不可满足（环溢出/服务重启）→ `resume{ok:false}`，端点拆旧隧道重建。
+    cid 为设备稳定标识（stable_cid），rid 前缀跨重连不变，桥侧隧道键天然续用。
+  - `hello.batch=true`（对端收批量）/ `welcome.batch=true`（relay 收批量）双向能力位；
+    `batch{frames:[json...]}` 信封合并小帧风暴，收端必须展开逐帧处理；能力位为假者绝不收信封。
+  - 端点续传纪律：断线不拆隧道流（上行排队，溢出拆流）；`http-req/http-res` 请求对
+    不跨连接续传（失败即失败）。
 - 背压：出站队列 64 条，溢出踢线（`bye{overflow}`）。relay 不解析业务载荷。
 
 ### 扫码入网 payload（二维码规范）

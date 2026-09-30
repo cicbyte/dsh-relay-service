@@ -117,15 +117,22 @@ pub async fn ensure_room_access(
     Ok(row)
 }
 
-/// 环境归属人（审计落账用；未知回 0）
+/// 环境归属人（审计落账用；未知回 0）。走 owner 缓存（60s TTL + 删环境主动失效）
 pub async fn owner_of(state: &AppState, room_id: &str) -> i64 {
-    room::Entity::find_by_id(room_id)
+    if let Some(o) = state.owner_cache.get(room_id) {
+        return o;
+    }
+    let owner = room::Entity::find_by_id(room_id)
         .one(&state.db)
         .await
         .ok()
         .flatten()
         .map(|r| r.owner_id)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    if owner != 0 {
+        state.owner_cache.put(room_id, owner);
+    }
+    owner
 }
 
 /// 重命名环境（需可访问）
@@ -152,6 +159,8 @@ pub async fn remove(state: &AppState, room_id: &str) -> Result<bool, AppError> {
         return Ok(false);
     }
     state.hub.kick_room(room_id);
+    state.hub.buf_clear_room(room_id);
+    state.owner_cache.invalidate(room_id);
     device::Entity::delete_many()
         .filter(device::Column::Room.eq(room_id))
         .exec(&state.db)
