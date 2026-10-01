@@ -108,6 +108,32 @@ fn json_text(v: &Value) -> String {
     v.to_string()
 }
 
+/// 编码二进制载荷帧：[seq:8 BE][rid_len:1][rid][payload]。
+/// seq 放头部便于续传回放排序；rid 自包含路由（回程 cid 前缀）。
+fn encode_bin_frame(rid: &str, _meta: &[u8], payload: &[u8], seq: u64) -> Vec<u8> {
+    let rid_bytes = rid.as_bytes();
+    let mut out = Vec::with_capacity(8 + 1 + rid_bytes.len() + payload.len());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.push(rid_bytes.len() as u8);
+    out.extend_from_slice(rid_bytes);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// 解析二进制载荷帧：返回 (seq, rid, payload)
+fn decode_bin_frame(bin: &[u8]) -> Option<(u64, &str, &[u8])> {
+    if bin.len() < 9 {
+        return None;
+    }
+    let seq = u64::from_be_bytes(bin[0..8].try_into().ok()?);
+    let rid_len = bin[8] as usize;
+    if bin.len() < 9 + rid_len {
+        return None;
+    }
+    let rid = std::str::from_utf8(&bin[9..9 + rid_len]).ok()?;
+    Some((seq, rid, &bin[9 + rid_len..]))
+}
+
 fn reject_msg(code: &str) -> String {
     tracing::warn!(reject = %code, "拒绝连接");
     json_text(&json!({ "type": "reject", "code": code }))
@@ -332,8 +358,16 @@ async fn handle(
             state.hub.leave(join.id);
             return Err("send resume failed".into());
         }
-        for f in replay_frames {
-            if sink.send(Message::Text(f)).await.is_err() {
+        for (bytes, is_binary) in replay_frames {
+            let msg = if is_binary {
+                Message::Binary(bytes)
+            } else {
+                match String::from_utf8(bytes) {
+                    Ok(t) => Message::Text(t.into()),
+                    Err(_) => continue,
+                }
+            };
+            if sink.send(msg).await.is_err() {
                 state.hub.leave(join.id);
                 return Err("send replay failed".into());
             }
@@ -399,7 +433,7 @@ async fn handle(
                                                 v["seq"] = json!(seq);
                                                 v["rid"] = json!(format!("{}.{}", join.cid, rid));
                                                 let out = v.to_string();
-                                                state.hub.buf_push(&dest, seq, out.clone());
+                                                state.hub.buf_push(&dest, seq, out.clone().into_bytes(), false);
                                                 match state.hub.host_tx(&room) {
                                                     Some(host_tx) if host_tx.send(WsOut::Text(out)).await.is_ok() => {}
                                                     _ => {
@@ -427,7 +461,7 @@ async fn handle(
                                                         v["seq"] = json!(seq);
                                                         v["rid"] = json!(orig);
                                                         let out = v.to_string();
-                                                        state.hub.buf_push(&dest, seq, out.clone());
+                                                        state.hub.buf_push(&dest, seq, out.clone().into_bytes(), false);
                                                         if let Some(ctx) = state.hub.client_tx(&room, &cid) {
                                                             let _ = ctx.send(WsOut::Text(out)).await;
                                                         }
@@ -443,7 +477,35 @@ async fn handle(
                                     }
                                 }
                             }
-                            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+                            Message::Binary(bin) => {
+                                // 二进制载荷帧（下载块零膨胀）：[seq:8][rid_len:1][rid][payload]，自包含路由
+                                // seq 注入 + 落环续传；rid 复用元数据帧回程路由（cid 前缀）。
+                                let Some((_old_seq, rid, payload)) = decode_bin_frame(&bin) else { continue };
+                                if role_s == "client" {
+                                    let dest = buf_key_host(&room);
+                                    let seq = state.hub.buf_alloc(&dest);
+                                    let full = encode_bin_frame(&format!("{}.{}", join.cid, rid), &[], payload, seq);
+                                    state.hub.buf_push(&dest, seq, full.clone(), true);
+                                    if let Some(host_tx) = state.hub.host_tx(&room) {
+                                        let _ = host_tx.send(WsOut::Binary(full)).await;
+                                    }
+                                } else {
+                                    let (cid, orig) = match rid.split_once('.') {
+                                        Some((c, o)) => (Some(c.to_string()), o.to_string()),
+                                        None => state.hub.sole_client(&room).map(|(c, _)| (Some(c), rid.to_string())).unwrap_or((None, rid.to_string())),
+                                    };
+                                    if let Some(cid) = cid {
+                                        let dest = buf_key_client(&room, &cid);
+                                        let seq = state.hub.buf_alloc(&dest);
+                                        let full = encode_bin_frame(&orig, &[], payload, seq);
+                                        state.hub.buf_push(&dest, seq, full.clone(), true);
+                                        if let Some(ctx) = state.hub.client_tx(&room, &cid) {
+                                            let _ = ctx.send(WsOut::Binary(full)).await;
+                                        }
+                                    }
+                                }
+                            }
+                            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
                             Message::Close(_) => done = true,
                         }
                     }
@@ -455,11 +517,13 @@ async fn handle(
                     Some(WsOut::Text(t)) => {
                         // 同刻积压合并成 batch 信封（仅对声明 batch 的对端；不加延迟）
                         let mut texts = vec![t];
+                        let mut pending_bin: Vec<Vec<u8>> = Vec::new();
                         let mut close_after = false;
                         if want_batch {
                             while texts.len() < 32 {
                                 match rx.try_recv() {
                                     Ok(WsOut::Text(t)) => texts.push(t),
+                                    Ok(WsOut::Binary(b)) => { pending_bin.push(b); break; }
                                     Ok(WsOut::Close) => { close_after = true; break; }
                                     Err(_) => break,
                                 }
@@ -472,8 +536,22 @@ async fn handle(
                         };
                         if sink.send(msg).await.is_err() {
                             done = true;
-                        } else if close_after {
-                            let _ = sink.send(Message::Close(None)).await;
+                        } else {
+                            for b in pending_bin {
+                                if sink.send(Message::Binary(b)).await.is_err() {
+                                    done = true;
+                                    break;
+                                }
+                            }
+                            if !done && close_after {
+                                let _ = sink.send(Message::Close(None)).await;
+                                done = true;
+                            }
+                        }
+                    }
+                    Some(WsOut::Binary(b)) => {
+                        // 二进制载荷帧逐帧发（batch 只合并文本元数据）
+                        if sink.send(Message::Binary(b)).await.is_err() {
                             done = true;
                         }
                     }

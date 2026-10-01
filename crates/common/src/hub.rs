@@ -17,15 +17,19 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum WsOut {
     Text(String),
+    Binary(Vec<u8>),
     Close,
 }
 
 pub type WsTx = mpsc::Sender<WsOut>;
 
+/// 帧载荷（统一字节模型）：文本/二进制都存字节，发时按 is_binary 适配 Message::Text/Binary
+pub type FramePayload = (Vec<u8>, bool);
+
 /// 续传回放判定
 pub enum Replay {
-    /// 断点之后的帧（按 seq 升序）
-    Frames(Vec<String>),
+    /// 断点之后的帧（按 seq 升序）；每项 (bytes, is_binary)
+    Frames(Vec<FramePayload>),
     /// 断点不可满足（环已绕回/服务重启）：端点应放弃旧流重建
     Reset,
 }
@@ -55,8 +59,8 @@ const BUF_MAX_BYTES: usize = 128 * 1024;
 const BUF_TTL_SECS: i64 = 30;
 
 struct SeqRing {
-    /// (seq, ts, frame)；seq 从 1 起连续分配
-    items: VecDeque<(u64, i64, String)>,
+    /// (seq, ts, bytes, is_binary)；seq 从 1 起连续分配
+    items: VecDeque<(u64, i64, Vec<u8>, bool)>,
     bytes: usize,
     next_seq: u64,
 }
@@ -71,14 +75,14 @@ impl SeqRing {
     }
 
     fn evict(&mut self, now: i64) {
-        while let Some(&(seq, ts, _)) = self.items.front() {
+        while let Some(&(seq, ts, _, _)) = self.items.front() {
             let over = self.items.len() > BUF_MAX_FRAMES
                 || self.bytes > BUF_MAX_BYTES
                 || now - ts > BUF_TTL_SECS;
             if !over {
                 break;
             }
-            if let Some((_, _, f)) = self.items.pop_front() {
+            if let Some((_, _, f, _)) = self.items.pop_front() {
                 self.bytes -= f.len();
             }
             let _ = seq;
@@ -417,12 +421,12 @@ impl WsHub {
     }
 
     /// 帧落环（调用方负责 seq 与帧内容一致）
-    pub fn buf_push(&self, dest: &str, seq: u64, frame: String) {
+    pub fn buf_push(&self, dest: &str, seq: u64, frame: Vec<u8>, is_binary: bool) {
         let mut bufs = self.bufs.lock().unwrap();
         let ring = bufs.entry(dest.to_string()).or_insert_with(SeqRing::new);
         let now = now_secs();
         ring.bytes += frame.len();
-        ring.items.push_back((seq, now, frame));
+        ring.items.push_back((seq, now, frame, is_binary));
         ring.evict(now);
     }
 
@@ -444,13 +448,13 @@ impl WsHub {
             // 端点比服务还超前：seq 已被重启重置
             return Replay::Reset;
         }
-        let frames: Vec<String> = ring
+        let frames: Vec<FramePayload> = ring
             .items
             .iter()
-            .filter(|(s, _, _)| *s > since)
-            .map(|(_, _, f)| f.clone())
+            .filter(|(s, _, _, _)| *s > since)
+            .map(|(_, _, f, b)| (f.clone(), *b))
             .collect();
-        let first = ring.items.iter().find(|(s, _, _)| *s > since).map(|(s, _, _)| *s);
+        let first = ring.items.iter().find(|(s, _, _, _)| *s > since).map(|(s, _, _, _)| *s);
         match first {
             // 断点之后第一帧必须正好衔接，否则中间有洞（环已绕回）
             Some(s) if s == since + 1 => Replay::Frames(frames),
