@@ -43,6 +43,11 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 DIST = HERE / "dist"
 
+# Windows GBK 控制台打不出 ✓ 等字符会直接崩；统一按 UTF-8 输出
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # 首次下发、之后永不覆盖/删除的远端内容（生产配置在服务器上改，如 swagger、限速）
 KEEP_REMOTE_PREFIXES = ("config/", "data/")
 
@@ -211,6 +216,9 @@ class Ssh:
                 if not quiet:
                     sys.stderr.write(dec_err.decode(data))
             if ch.exit_status_ready() and not ch.recv_ready() and not ch.recv_stderr_ready():
+                break
+            if ch.closed:
+                # 远端命令已结束/通道已死但 exit status 丢失时的逃生口，防死等
                 break
             time.sleep(0.02)
         code = ch.recv_exit_status()
@@ -423,10 +431,17 @@ def do_health(ssh: Ssh) -> None:
         url = env(f"{svc.upper()}_HEALTH_URL")
         if not url:
             continue
-        code, out, _ = ssh.run(
-            f"curl -sf --max-time 5 {shlex.quote(url)} || echo FAIL", check=False, quiet=True
-        )
-        print(f"  · 健康检查 {svc}: {url} → {'ok' if 'FAIL' not in out else 'FAIL'}")
+        # 刚重启的服务可能尚未绑端口（部署时实测竞态），短重试 3 次
+        ok = False
+        for _ in range(3):
+            code, out, _ = ssh.run(
+                f"curl -sf --max-time 5 {shlex.quote(url)} || echo FAIL", check=False, quiet=True
+            )
+            if "FAIL" not in out:
+                ok = True
+                break
+            time.sleep(1)
+        print(f"  · 健康检查 {svc}: {url} → {'ok' if ok else 'FAIL'}")
 
 
 def do_status(ssh: Ssh) -> None:
@@ -439,6 +454,35 @@ def do_status(ssh: Ssh) -> None:
 def do_logs(ssh: Ssh, lines: int) -> None:
     units = " ".join(f"-u {unit_name(s)}" for s in services())
     ssh.run(f"journalctl {units} -n {lines} --no-pager", sudo=True, check=False)
+
+
+def do_admin_web(ssh: Ssh) -> None:
+    """构建并上传管理台前端：本地 npm build → tar → <REMOTE_DIR>/apps/admin-web/dist。
+    服务按 WorkingDirectory 下的 apps/admin-web/dist 找控制台，缺失时降级为提示页。"""
+    dist = REPO / "apps" / "admin-web" / "dist"
+    if not (dist / "index.html").is_file():
+        print("→ 构建管理台前端（npm run build）")
+        if not (REPO / "apps" / "admin-web" / "node_modules").is_dir():
+            run_local("cd apps/admin-web && npm install")
+        run_local("cd apps/admin-web && npm run build")
+    if not (dist / "index.html").is_file():
+        sys.exit("admin-web 构建产物缺失：apps/admin-web/dist/index.html")
+
+    DIST.mkdir(exist_ok=True)
+    pkg = DIST / f"dsh-relay-admin-{datetime.now():%Y%m%d-%H%M%S}.tar.gz"
+    with tarfile.open(pkg, "w:gz") as tar:
+        tar.add(str(dist), arcname="dist")
+    print(f"→ 打包 {pkg.name}（{pkg.stat().st_size / 1024 / 1024:.1f} MB）")
+
+    print("→ 上传管理台前端（解到 apps/admin-web/）")
+    ssh.put_file(pkg, ".admin-web.tar.gz")
+    ssh.run(f"mkdir -p {shlex.quote(ssh.rdir)}/apps/admin-web", quiet=True)
+    ssh.run(
+        f"rm -rf {shlex.quote(ssh.rdir)}/apps/admin-web/dist"
+        f" && tar -xzf {shlex.quote(ssh.rdir)}/.admin-web.tar.gz -C {shlex.quote(ssh.rdir)}/apps/admin-web"
+        f" && rm -f {shlex.quote(ssh.rdir)}/.admin-web.tar.gz",
+        quiet=True,
+    )
 
 
 def do_deploy(ssh: Ssh, *, skip_build: bool, force: bool) -> None:
@@ -456,6 +500,7 @@ def do_deploy(ssh: Ssh, *, skip_build: bool, force: bool) -> None:
     else:
         print("→ 二进制与配置均无变化，跳过上传与重启（--force 可强制）")
     do_health(ssh)
+    do_admin_web(ssh)
 
 
 def main() -> None:
@@ -467,8 +512,8 @@ def main() -> None:
         "cmd",
         nargs="?",
         default="deploy",
-        choices=["deploy", "setup", "build", "pack", "upload", "restart", "status", "logs"],
-        help="deploy(默认)=编译+打包+上传+重启一条龙；其余为分步命令",
+        choices=["deploy", "setup", "build", "pack", "upload", "admin", "restart", "status", "logs"],
+        help="deploy(默认)=编译+打包+上传+重启一条龙；admin=仅构建上传管理台前端；其余为分步命令",
     )
     parser.add_argument("--skip-build", action="store_true", help="deploy 时跳过本地编译（用现有产物）")
     parser.add_argument("--force", action="store_true", help="二进制无变化也强制上传重启")
@@ -500,6 +545,8 @@ def main() -> None:
             else:
                 print("→ 二进制无变化，跳过上传与重启（--force 可强制）")
             do_health(ssh)
+        elif args.cmd == "admin":
+            do_admin_web(ssh)
         elif args.cmd == "restart":
             do_restart(ssh)
         elif args.cmd == "status":
