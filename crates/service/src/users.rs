@@ -71,8 +71,15 @@ pub async fn create(
     Ok(view(row.insert(&state.db).await?))
 }
 
-/// 重置密码（管理员代办）：轮转 nonce，该用户所有端全部下线
-pub async fn reset_password(state: &AppState, id: i64, password: &str) -> Result<(), AppError> {
+/// 重置密码（管理员代办）：改密 + 轮转 nonce 让该用户其他端下线。
+/// 但若 actor 就是被重置者（admin 改自己），保留其当前 refresh_nonce——否则自己改完密码
+/// 立刻被登出（401 无感刷新失效），前端把成功误判为失败（2026-10-01 实锤）。
+pub async fn reset_password(
+    state: &AppState,
+    id: i64,
+    password: &str,
+    actor_id: i64,
+) -> Result<(), AppError> {
     if password.len() < 8 {
         return Err(AppError::bad_request("密码至少 8 位"));
     }
@@ -83,7 +90,10 @@ pub async fn reset_password(state: &AppState, id: i64, password: &str) -> Result
     let hash = bcrypt::hash(password, 10)?;
     let mut am = user.into_active_model();
     am.password_hash = Set(hash);
-    am.refresh_nonce = Set(rand_hex(8));
+    if actor_id != id {
+        // 改的是别人：轮转 nonce，令其所有端下线
+        am.refresh_nonce = Set(rand_hex(8));
+    }
     am.update(&state.db).await?;
     Ok(())
 }

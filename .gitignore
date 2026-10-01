@@ -4,3 +4,5 @@
 /data
 /deploy/.env
 /deploy/dist/
+# 插件独立仓（同级并入，不属于本仓）
+/dsh-relay-plugin/

@@ -115,7 +115,8 @@ pub async fn change_password(
     let hash = bcrypt::hash(new_password, 10)?;
     let mut am = user.into_active_model();
     am.password_hash = Set(hash);
-    am.refresh_nonce = Set(rand_hex(8));
+    // 保留当前 refresh_nonce：改的是自己，不能把自己登出（否则改完密码立刻 401 跳登录页）。
+    // 代价是其他端未即时下线（精确按端失效需 JWT 带 nonce，另做）；access 过期后自然收敛。
     am.update(&state.db).await?;
     Ok(())
 }

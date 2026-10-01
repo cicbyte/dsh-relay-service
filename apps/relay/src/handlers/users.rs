@@ -47,7 +47,8 @@ pub async fn reset_password(
     Json(body): Json<ResetPasswordReq>,
 ) -> Result<Json<Resp<()>>, AppError> {
     relay_service::users::require_admin(&identity)?;
-    relay_service::users::reset_password(&state, id, &body.password).await?;
+    // 传 actor.user_id：admin 改自己时不作废当前会话（否则自己改完就被登出）
+    relay_service::users::reset_password(&state, id, &body.password, identity.user_id).await?;
     tracing::info!(user_id = id, "已重置用户密码");
     Ok(Json(Resp::ok_empty()))
 }
