@@ -2,3 +2,5 @@
 /test/node_modules
 /apps/admin-web/node_modules
 /data
+/deploy/.env
+/deploy/dist/
