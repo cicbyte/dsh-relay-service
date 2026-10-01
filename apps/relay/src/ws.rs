@@ -46,7 +46,7 @@ impl Role {
 }
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-const PING_INTERVAL: Duration = Duration::from_secs(15);
+const PING_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// hello 鉴权失败限速（每 IP）
 const MAX_FAILS: u32 = 10;
