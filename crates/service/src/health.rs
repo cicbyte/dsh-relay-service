@@ -62,6 +62,20 @@ pub async fn detail(state: &AppState) -> Result<HealthDetail, AppError> {
     })
 }
 
+/// 用户名下环境集合（归属裁剪共用：/api/status、/api/metrics，#920）
+pub async fn owned_rooms(
+    state: &AppState,
+    user_id: i64,
+) -> Result<std::collections::HashSet<String>, AppError> {
+    Ok(room::Entity::find()
+        .filter(room::Column::OwnerId.eq(user_id))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|r| r.room)
+        .collect())
+}
+
 /// 运行概览（多用户按归属裁剪：admin 全量，user 只统计自己的环境）
 pub async fn overview(
     state: &AppState,

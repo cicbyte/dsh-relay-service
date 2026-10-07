@@ -44,7 +44,9 @@ async fn run() {
         "device" | "code" => {}
         other => {
             eprintln!("auth_mode 非法：{other:?}（只支持 \"device\" | \"code\"），拒绝启动");
-            return;
+            // 非 0 退出码：systemd Restart=on-failure 依赖它判定「失败」并拉起；
+            // 返回 0 会被当成正常退出，坏配置的服务就永远躺平了
+            std::process::exit(2);
         }
     }
     let db = relay_migration::init_db_connect(&config.database.url)
@@ -67,6 +69,7 @@ async fn run() {
     //（启动时已清过一次，此后每 6h 一轮）
     relay_service::audit::start_batch_writer(state.db.clone());
     {
+        let st = state.clone();
         let db = state.db.clone();
         let retain_days = config.audit.retain_days;
         tokio::spawn(async move {
@@ -77,6 +80,12 @@ async fn run() {
                 tick.tick().await;
                 if let Err(e) = relay_migration::cleanup_audit(&db, retain_days).await {
                     tracing::warn!(error = %e, "审计周期清理失败");
+                }
+                // 孤儿续传环回收：host 常驻时废弃 client 设备的环永不被
+                // touch/裁剪（TTL 只在被访问时生效），周期兜底（#920）
+                let reclaimed = st.hub.reclaim_orphan_rings();
+                if reclaimed > 0 {
+                    tracing::info!(count = reclaimed, "已回收孤儿续传环");
                 }
             }
         });
@@ -113,6 +122,10 @@ async fn run() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("HTTP 服务异常退出");
+
+    // 优雅停机：把批量通道里剩余的审计行写完再退（5s 兜底，DB 卡死不拖停机）
+    relay_service::audit::shutdown_flush(&state.db).await;
+    tracing::info!("已停机");
 }
 
 /// 优雅停机：Ctrl+C / SIGTERM 后停止接收新连接

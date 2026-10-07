@@ -403,22 +403,29 @@ async fn handle(
     }
 
     // ---- 续传判定 + 断点回放（同任务直发；活帧在 rx 排队，先后序有保证） ----
+    // replay_high = 快照内最大 seq：生产者「环入列→查对端→try_send」与快照交错
+    // 时，同一帧会既进快照又进 mpsc（双投递）——接收循环按它过滤，端点按 seq
+    // 单调消费不重不漏（2026-10 第二轮审查 #916）
+    let mut replay_high: u64 = 0;
     if let Some(since) = resume_from {
         let dest = if role_s == "client" {
             buf_key_client(&room, &join.cid)
         } else {
             buf_key_host(&room)
         };
-        let (verdict, replay_frames) = match state.hub.buf_replay(&dest, since) {
-            Replay::Frames(frames) => (
+        let (verdict, replay_frames, high) = match state.hub.buf_replay(&dest, since) {
+            Replay::Frames { frames, high } => (
                 json!({ "type": "resume", "ok": true, "count": frames.len() }),
                 frames,
+                high,
             ),
             Replay::Reset => (
                 json!({ "type": "resume", "ok": false, "reason": "reset" }),
                 Vec::new(),
+                since,
             ),
         };
+        replay_high = high;
         if sink.send(Message::Text(json_text(&verdict))).await.is_err() {
             state.hub.leave(join.id);
             return Err("send resume failed".into());
@@ -503,15 +510,15 @@ async fn handle(
                                                 let dest = buf_key_host(&room);
                                                 v["rid"] = json!(format!("{}.{}", join.cid, rid));
                                                 // seq 分配+注入+落环单锁原子（防并发交错判洞误报）
-                                                let (_seq, bytes) = state.hub.buf_alloc_push_with(&dest, false, |seq| {
-                                                    v["seq"] = json!(seq);
+                                                let (seq, bytes) = state.hub.buf_alloc_push_with(&dest, false, |s| {
+                                                    v["seq"] = json!(s);
                                                     v.to_string().into_bytes()
                                                 });
                                                 let out = String::from_utf8(bytes).unwrap_or_default();
                                                 // 背压：try_send 不等慢端——队列满即放弃本次直发
                                                 //（续传模式下帧已在环里，重连回放补；老端报 peer-offline）
                                                 match state.hub.host_tx(&room) {
-                                                    Some(host_tx) if host_tx.try_send(WsOut::Text(out)).is_ok() => {
+                                                    Some(host_tx) if host_tx.try_send(WsOut::Tunneled { seq, frame: Box::new(WsOut::Text(out)) }).is_ok() => {
                                                         state.metrics.bump(&state.metrics.frames_relayed);
                                                     }
                                                     _ => {
@@ -536,14 +543,14 @@ async fn handle(
                                                     Some(cid) => {
                                                         let dest = buf_key_client(&room, &cid);
                                                         v["rid"] = json!(orig);
-                                                        let (_seq, bytes) = state.hub.buf_alloc_push_with(&dest, false, |seq| {
-                                                            v["seq"] = json!(seq);
+                                                        let (seq, bytes) = state.hub.buf_alloc_push_with(&dest, false, |s| {
+                                                            v["seq"] = json!(s);
                                                             v.to_string().into_bytes()
                                                         });
                                                         let out = String::from_utf8(bytes).unwrap_or_default();
                                                         if let Some(ctx) = state.hub.client_tx(&room, &cid) {
                                                             // 队列满 = 慢端：丢直发（环里已有，重连回放补）
-                                                            if ctx.try_send(WsOut::Text(out)).is_ok() {
+                                                            if ctx.try_send(WsOut::Tunneled { seq, frame: Box::new(WsOut::Text(out)) }).is_ok() {
                                                                 state.metrics.bump(&state.metrics.frames_relayed);
                                                             } else {
                                                                 tracing::warn!(room = %room, rid = %rid, "client 出站满，丢弃直发（回放兜底）");
@@ -565,14 +572,16 @@ async fn handle(
                                 // 二进制载荷帧（下载块零膨胀）：[seq:8][rid_len:1][rid][payload]，自包含路由
                                 // seq 注入 + 落环续传；rid 复用元数据帧回程路由（cid 前缀）。
                                 let Some((_old_seq, rid, payload)) = decode_bin_frame(&bin) else { continue };
+                                // 指标口径：二进制帧（下载块=流量主体）同样计入入站帧数
+                                state.metrics.bump(&state.metrics.frames_in);
                                 if role_s == "client" {
                                     let dest = buf_key_host(&room);
                                     // seq 分配+构帧+落环单锁原子；返回字节与入环同一份（免 clone）
-                                    let (_seq, full) = state.hub.buf_alloc_push_with(&dest, true, |seq| {
-                                        encode_bin_frame(&format!("{}.{}", join.cid, rid), &[], payload, seq)
+                                    let (seq, full) = state.hub.buf_alloc_push_with(&dest, true, |s| {
+                                        encode_bin_frame(&format!("{}.{}", join.cid, rid), &[], payload, s)
                                     });
                                     if let Some(host_tx) = state.hub.host_tx(&room) {
-                                        if host_tx.try_send(WsOut::Binary(full)).is_ok() {
+                                        if host_tx.try_send(WsOut::Tunneled { seq, frame: Box::new(WsOut::Binary(full)) }).is_ok() {
                                             state.metrics.bump(&state.metrics.frames_relayed);
                                         } else {
                                             tracing::warn!(room = %room, rid = %rid, "host 出站满，丢弃直发（回放兜底）");
@@ -585,11 +594,11 @@ async fn handle(
                                     };
                                     if let Some(cid) = cid {
                                         let dest = buf_key_client(&room, &cid);
-                                        let (_seq, full) = state.hub.buf_alloc_push_with(&dest, true, |seq| {
-                                            encode_bin_frame(&orig, &[], payload, seq)
+                                        let (seq, full) = state.hub.buf_alloc_push_with(&dest, true, |s| {
+                                            encode_bin_frame(&orig, &[], payload, s)
                                         });
                                         if let Some(ctx) = state.hub.client_tx(&room, &cid) {
-                                            if ctx.try_send(WsOut::Binary(full)).is_ok() {
+                                            if ctx.try_send(WsOut::Tunneled { seq, frame: Box::new(WsOut::Binary(full)) }).is_ok() {
                                                 state.metrics.bump(&state.metrics.frames_relayed);
                                             } else {
                                                 tracing::warn!(room = %room, rid = %rid, "client 出站满，丢弃直发（回放兜底）");
@@ -606,6 +615,16 @@ async fn handle(
                 }
             }
             out = rx.recv() => {
+                // 续传防重：双投递帧（既进回放快照又进 mpsc）按高水位丢弃
+                let out = match out {
+                    Some(WsOut::Tunneled { seq, frame }) => {
+                        if seq <= replay_high {
+                            continue;
+                        }
+                        Some(*frame)
+                    }
+                    other => other,
+                };
                 match out {
                     Some(WsOut::Text(t)) => {
                         out_bytes += t.len();
@@ -614,12 +633,30 @@ async fn handle(
                         let mut pending_bin: Vec<Vec<u8>> = Vec::new();
                         let mut close_after = false;
                         if want_batch {
+                            let mut batch_bytes = 0usize;
                             while texts.len() < 32 {
                                 match rx.try_recv() {
+                                    Ok(WsOut::Tunneled { seq, frame }) => {
+                                        if seq <= replay_high {
+                                            continue;
+                                        }
+                                        match *frame {
+                                            WsOut::Text(t) => { batch_bytes += t.len(); out_bytes += t.len(); texts.push(t); }
+                                            WsOut::Binary(b) => { out_bytes += b.len(); pending_bin.push(b); break; }
+                                            WsOut::Close => { close_after = true; break; }
+                                            WsOut::Tunneled { .. } => unreachable!(),
+                                        }
+                                    }
                                     Ok(WsOut::Text(t)) => { out_bytes += t.len(); texts.push(t); }
                                     Ok(WsOut::Binary(b)) => { out_bytes += b.len(); pending_bin.push(b); break; }
                                     Ok(WsOut::Close) => { close_after = true; break; }
                                     Err(_) => break,
+                                }
+                                // 信封字节上限：只限条数不限字节时，多条 4MiB 级文本帧
+                                // 可拼出 4~64MiB 信封——收端按 4MiB 上限解析即 capacity
+                                // error 断连（第二轮审查 #916）。接近 1MiB 即停。
+                                if batch_bytes > 1024 * 1024 {
+                                    break;
                                 }
                             }
                         }
@@ -631,15 +668,19 @@ async fn handle(
                             done = true;
                             continue;
                         }
+                        // 发送字节数先算好再消费 texts：此前单帧分支 remove(0) 取走
+                        // 唯一元素后对空 vec 求和减 0，帧字节永久滞留计数（dcd1279
+                        // 回归）→ 等效累计历史流量，健康连接慢涨被误判 overflow
+                        let sent_bytes: usize = texts.iter().map(|t| t.len()).sum();
                         let msg = if texts.len() > 1 {
                             Message::Text(json_text(&json!({ "type": "batch", "frames": texts })))
                         } else {
-                            Message::Text(texts.remove(0))
+                            Message::Text(texts.pop().unwrap_or_default())
                         };
                         if sink.send(msg).await.is_err() {
                             done = true;
                         } else {
-                            out_bytes = out_bytes.saturating_sub(texts.iter().map(|t| t.len()).sum());
+                            out_bytes = out_bytes.saturating_sub(sent_bytes);
                             for b in pending_bin {
                                 let n = b.len();
                                 if sink.send(Message::Binary(b)).await.is_err() {
@@ -675,6 +716,8 @@ async fn handle(
                         let _ = sink.send(Message::Close(None)).await;
                         done = true;
                     }
+                    // 预过滤已剥掉 Tunneled 外壳（嵌套 Tunneled 不存在）
+                    Some(WsOut::Tunneled { .. }) => unreachable!(),
                     None => done = true,
                 }
             }

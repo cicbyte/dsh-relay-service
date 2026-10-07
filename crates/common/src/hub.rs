@@ -19,6 +19,10 @@ pub enum WsOut {
     Text(String),
     Binary(Vec<u8>),
     Close,
+    /// 隧道数据帧（已按 seq 落环）：携带 seq 供接收循环做防重过滤——回放快照
+    /// 与生产者 try_send 交错时同一帧会同时进快照和 mpsc（双投递），按
+    /// 「seq ≤ 本连接回放高水位即丢弃」根治（2026-10 第二轮审查 #916）。
+    Tunneled { seq: u64, frame: Box<WsOut> },
 }
 
 pub type WsTx = mpsc::Sender<WsOut>;
@@ -28,8 +32,9 @@ pub type FramePayload = (Vec<u8>, bool);
 
 /// 续传回放判定
 pub enum Replay {
-    /// 断点之后的帧（按 seq 升序）；每项 (bytes, is_binary)
-    Frames(Vec<FramePayload>),
+    /// 断点之后的帧（按 seq 升序）；每项 (bytes, is_binary)。
+    /// high=快照内最大 seq（空快照=since）——接收循环据此过滤双投递帧。
+    Frames { frames: Vec<FramePayload>, high: u64 },
     /// 断点不可满足（环已绕回/服务重启）：端点应放弃旧流重建
     Reset,
 }
@@ -444,7 +449,7 @@ impl WsHub {
         let Some(ring) = bufs.get_mut(dest) else {
             // 无环：从未发过帧（干净起点）或服务已重启（有历史断点）
             return if since == 0 {
-                Replay::Frames(Vec::new())
+                Replay::Frames { frames: Vec::new(), high: since }
             } else {
                 Replay::Reset
             };
@@ -461,11 +466,19 @@ impl WsHub {
             .filter(|(s, _, _, _)| *s > since)
             .map(|(_, _, f, b)| (f.clone(), *b))
             .collect();
+        // 高水位 = 快照内最大 seq（items 按 seq 单调追加）；空快照退回 since
+        let high = ring
+            .items
+            .iter()
+            .filter(|(s, _, _, _)| *s > since)
+            .map(|(s, _, _, _)| *s)
+            .max()
+            .unwrap_or(since);
         let first = ring.items.iter().find(|(s, _, _, _)| *s > since).map(|(s, _, _, _)| *s);
         match first {
             // 断点之后第一帧必须正好衔接，否则中间有洞（环已绕回）
-            Some(s) if s == since + 1 => Replay::Frames(frames),
-            None if since == last => Replay::Frames(Vec::new()),
+            Some(s) if s == since + 1 => Replay::Frames { frames, high },
+            None if since == last => Replay::Frames { frames, high: since },
             _ => Replay::Reset,
         }
     }
@@ -486,6 +499,29 @@ impl WsHub {
         let bytes = bufs.values().map(|r| r.bytes).sum::<usize>();
         (bufs.len(), bytes)
     }
+
+    /// 孤儿续传环回收：环的 TTL 裁剪只在被访问（alloc/replay）时发生——
+    /// host 常驻 + client 设备被删除后，该 client 目的地的环永不再被访问，
+    /// 每个废弃环最多滞留 128KiB。周期扫描：目的地已不在任何在房 slot 里
+    /// 即删环（若设备真回来了，回放会判 Reset → 端点安全重建，语义无损）。
+    /// 返回回收环数（2026-10 第二轮审查 #920）。
+    pub fn reclaim_orphan_rings(&self) -> usize {
+        let rooms = self.rooms.lock().unwrap();
+        let mut bufs = self.bufs.lock().unwrap();
+        let before = bufs.len();
+        bufs.retain(|k, _| {
+            if let Some(room) = k.strip_suffix("\u{0}h") {
+                // host 键 "{room}\0h"：host 在房才保
+                rooms.get(room).is_some_and(|s| s.host.is_some())
+            } else if let Some((room, _cid)) = k.split_once("\u{0}c\u{0}") {
+                // client 键 "{room}\0c\0{cid}"：房间在房才保（房没了整房环都该清）
+                rooms.contains_key(room)
+            } else {
+                true // 未知格式：保守保留
+            }
+        });
+        before - bufs.len()
+    }
 }
 
 // ---- 单测：续传环（分配/回放/判洞/裁剪/清房） ----
@@ -502,20 +538,27 @@ mod tests {
         assert_eq!((s1, s2), (1, 2));
         // since=0 → 整段回放（帧字节与发送侧同一内容）
         match hub.buf_replay(&dest, 0) {
-            Replay::Frames(fs) => {
+            Replay::Frames { frames: fs, high } => {
                 assert_eq!(fs.len(), 2);
                 assert_eq!(fs[0], (f1, false));
+                assert_eq!(high, 2, "高水位应为快照内最大 seq");
             }
             _ => panic!("完整环应整段回放"),
         }
         // 断点续传：since=1 只补第二帧
         match hub.buf_replay(&dest, 1) {
-            Replay::Frames(fs) => assert_eq!(fs.len(), 1),
+            Replay::Frames { frames: fs, high } => {
+                assert_eq!(fs.len(), 1);
+                assert_eq!(high, 2);
+            }
             _ => panic!("断点后应只补增量"),
         }
-        // 追平 → 空回放（非 Reset）
+        // 追平 → 空回放（非 Reset），高水位退回 since
         match hub.buf_replay(&dest, 2) {
-            Replay::Frames(fs) => assert!(fs.is_empty()),
+            Replay::Frames { frames: fs, high } => {
+                assert!(fs.is_empty());
+                assert_eq!(high, 2);
+            }
             _ => panic!("追平后应回空而非 Reset"),
         }
     }
@@ -526,7 +569,7 @@ mod tests {
         // 无环 + since>0 → 服务侧无历史 → Reset
         assert!(matches!(hub.buf_replay(&buf_key_host("none"), 5), Replay::Reset));
         // 无环 + since=0 → 干净起点（空帧序列）
-        assert!(matches!(hub.buf_replay(&buf_key_host("none"), 0), Replay::Frames(_)));
+        assert!(matches!(hub.buf_replay(&buf_key_host("none"), 0), Replay::Frames { .. }));
         let dest = buf_key_host("roomb");
         hub.buf_alloc_push_with(&dest, false, |_| b"only".to_vec());
         // 端点比服务超前（服务重启 seq 重置）→ Reset
@@ -549,7 +592,7 @@ mod tests {
         }
         // 首帧即洞：since=0 → Reset（对端安全降级重拉）；since 追平 → 空回放
         assert!(matches!(hub.buf_replay(&dest, 0), Replay::Reset));
-        assert!(matches!(hub.buf_replay(&dest, 1), Replay::Frames(_)));
+        assert!(matches!(hub.buf_replay(&dest, 1), Replay::Frames { .. }));
     }
 
     #[test]
@@ -571,7 +614,7 @@ mod tests {
         assert!(matches!(hub.buf_replay(&dest, 0), Replay::Reset));
         // 从首个存活帧起 → 尾部连续可回放
         match hub.buf_replay(&dest, first_kept - 1) {
-            Replay::Frames(fs) => assert!(!fs.is_empty()),
+            Replay::Frames { frames: fs, .. } => assert!(!fs.is_empty()),
             _ => panic!("存活尾段应可回放"),
         }
     }
@@ -583,7 +626,7 @@ mod tests {
         hub.buf_alloc_push_with(&dest, false, |_| b"x".to_vec());
         hub.buf_clear_room("roome");
         // 环已删：since=0 → 干净起点（而非残留历史）
-        assert!(matches!(hub.buf_replay(&dest, 0), Replay::Frames(_)));
+        assert!(matches!(hub.buf_replay(&dest, 0), Replay::Frames { .. }));
         assert!(matches!(hub.buf_replay(&dest, 1), Replay::Reset));
     }
 }
