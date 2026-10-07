@@ -4,6 +4,7 @@ pub mod audit;
 pub mod auth;
 pub mod devices;
 pub mod health;
+pub mod metrics;
 pub mod openapi;
 pub mod page;
 pub mod pairing;

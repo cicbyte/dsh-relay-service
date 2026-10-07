@@ -24,7 +24,7 @@ dsh-relay-service/
 ├── apps/relay/              # 可执行 dsh-relay-server
 │   ├── src/ws.rs            # WS 转发数据面（dsh-relay-v1）
 │   ├── src/router.rs        # 管理面路由（公开组限速 / 受保护组 JWT+oplog）
-│   ├── src/handlers/        # auth / devices / pairing / audit / status / health / openapi
+│   ├── src/handlers/        # auth / devices / pairing / audit / status / health / metrics / openapi
 │   └── src/admin.html       # 内置管理台（单文件控制台）
 └── crates/
     ├── common               # 配置/响应壳{code,result,message}/AppError/JWT/分页/ws-hub
@@ -37,12 +37,16 @@ dsh-relay-service/
 - **管理台**：`http://<host>:8788/`（登录 → 概览 / 设备吊销·轮换·删除 / 配对码 / 审计 / 用户管理）。
   初始账号 `admin`，密码由 `ADMIN_PASSWORD` 环境变量指定或首启随机生成（日志只打印一次）。
 - **管理 API**：`/api/openapi.json` 可查全量接口；JWT（access 2h + refresh 7d，nonce 轮转）。
+  `/api/metrics`（JWT）输出进程内指标快照：uptime、连接/转发计数、续传环数量与字节水位
+  （环水位长期贴顶 = 有慢端在靠 TTL 裁剪硬扛）。
 - **多用户与权限**（权限矩阵写死代码，仅两种角色）：
   - **admin**：用户管理（增删用户/重置密码，无自助注册）+ 全部环境 + 全量审计；
   - **user**：仅自己的环境/设备/配对码/审计（`rooms.owner_id` 归属隔离，越权统一 404 不泄露存在性）。
   - 删用户级联删其全部环境（踢线+设备+配对码）；不可删自己/最后一个管理员；重置密码令该用户全部端下线。
   - 审计到人（`audit_logs.user_id`）：管理操作记录操作人，连接事件按环境归属记账。
-- **持久化**：sqlite（`data/relay.db`，迁移自动建表）；审计按 `audit.retain_days` 启动清理。
+- **持久化**：sqlite（`data/relay.db`，迁移自动建表）；审计按 `audit.retain_days`
+  启动清理 + 每 6h 周期清理；conn.open/close 高频事件走批量落库（攒批 ≤100 条
+  insert_many，通道满回退同步写不丢事件）。
 - **安全**：bcrypt 管理密码、登录失败限速（默认 10 次/60s）、设备令牌只存 SHA-256、
   吊销即时踢线、写操作 oplog 落审计、WS hello 失败限速、默认 `auth_mode=device` fail-closed。
 - **部署建议**：公网务必置于 TLS 反代后（Caddy/Nginx，WS 走 wss）；`server.trust_proxy=true`
@@ -51,17 +55,29 @@ dsh-relay-service/
 ## 帧协议（文本帧，UTF-8 JSON，一帧一对象，单帧 ≤ 4 MiB）
 
 ```
-C→S  hello {role:'host'|'client', code?, deviceId?, token?, pairingCode?, name?}
-                              首帧，10s 内必须到达；auth_mode=device 时必须带 token 或 pairingCode
-S→C  welcome {role, peerOnline, clients, room, auth:'token'|'pairing'|'code', device?:{id,token}}
+C→S  hello {role:'host'|'client', code?, deviceId?, token?, pairingCode?, name?, resumeFrom?, batch?}
+                               首帧，10s 内必须到达；auth_mode=device 时必须带 token 或 pairingCode
+S→C  welcome {role, peerOnline, clients, room, batch, auth:'token'|'pairing'|'code', device?:{id,token}}
 S→C  reject {code} | peer {online, clients:[...]} | bye {code}
+S→C  resume {ok, count}        断点回放应答（ok=false = 断点不可满足，端点拆旧隧道重建）
 双向 http-req {rid, method, path, body}          手机→桥：HTTP 请求
 双向 http-res {rid, status, body, setCookie?}    桥→手机：HTTP 响应
 双向 ws-open {rid, path, headers?}               手机→桥：WS 隧道（桥以 ws-frame{text:'__open__'} 应答）
 双向 ws-frame {rid, text}                        隧道数据帧
 双向 ws-close {rid}                              隧道关闭
 双向 error {rid?, code, message}
+双向 batch {frames:[json...]}                    能力位协商后的批量信封（见 v3 续传与批量）
 ```
+
+**二进制载荷帧**（v3，隧道大数据零 base64 膨胀；与文本帧互斥使用同一连接）：
+
+```
+[seq:8 BE][rid_len:1][rid][payload]
+```
+
+`seq` 在头部便于续传回放排序；`rid` 自包含回程路由（client→host 由桥写 `cid.orig`，
+host→client 由 relay 剥前缀定向）。桥以 `ws-frame{text}` 元数据帧描述流（如下载
+meta），字节块走本帧。
 
 ### 环境模型（1 host : N client）
 
@@ -101,7 +117,8 @@ S→C  reject {code} | peer {online, clients:[...]} | bye {code}
     `batch{frames:[json...]}` 信封合并小帧风暴，收端必须展开逐帧处理；能力位为假者绝不收信封。
   - 端点续传纪律：断线不拆隧道流（上行排队，溢出拆流）；`http-req/http-res` 请求对
     不跨连接续传（失败即失败）。
-- 背压：出站队列 64 条，溢出踢线（`bye{overflow}`）。relay 不解析业务载荷。
+- 背压：出站队列 256 条 + 64MiB 字节预算，超限踢线（`bye{overflow}`）；全局连接上限
+  256、单 IP 16。relay 不解析业务载荷（只路由 rid/seq 与落环）。
 
 ### 扫码入网 payload（二维码规范）
 

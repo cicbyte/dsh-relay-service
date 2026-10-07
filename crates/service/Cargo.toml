@@ -16,5 +16,6 @@ subtle.workspace = true
 getrandom.workspace = true
 tracing.workspace = true
 utoipa.workspace = true
+tokio.workspace = true
 relay-common.workspace = true
 relay-entity.workspace = true

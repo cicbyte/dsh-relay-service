@@ -3,7 +3,10 @@
 use relay_common::util::{now_secs, rand_hex};
 use relay_common::{AppError, AppState};
 use relay_entity::pairing_code;
-use sea_orm::{ActiveModelTrait, EntityTrait, Insert, IntoActiveModel, Set};
+use sea_orm::{
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, EntityTrait, Insert, IntoActiveModel,
+    QueryFilter, Set,
+};
 use serde::Serialize;
 
 /// 配对码有效期（秒）
@@ -133,6 +136,21 @@ pub async fn redeem(
 
     let token = crate::device::new_token();
     let dev_id = format!("dev_{}", rand_hex(6));
+    let pending = format!("pending:{dev_id}");
+
+    // 原子核销占位：条件 UPDATE ... WHERE used_by IS NULL——并发双花只有一个赢家
+    // （此前 read-check-write 有窗口：两请求都能通过 used_by 检查、各建一台设备）
+    let claim = pairing_code::Entity::update_many()
+        .col_expr(pairing_code::Column::UsedBy, Expr::value(pending.clone()))
+        .filter(pairing_code::Column::Code.eq(code))
+        .filter(pairing_code::Column::UsedBy.is_null())
+        .exec(&state.db)
+        .await
+        .map_err(|_| PairErr::Invalid)?;
+    if claim.rows_affected == 0 {
+        return Err(PairErr::Used);
+    }
+
     let dev_name = if !name.is_empty() {
         name.to_string()
     } else if !row.name.is_empty() {
@@ -140,13 +158,27 @@ pub async fn redeem(
     } else {
         "device".to_string()
     };
-    let dev = crate::device::create(state, &dev_id, &dev_name, role, &final_room, &token)
-        .await
-        .map_err(|_| PairErr::Invalid)?;
-
-    let mut am = row.into_active_model();
-    am.used_by = Set(Some(dev_id));
-    let _ = am.update(&state.db).await;
+    let dev = match crate::device::create(state, &dev_id, &dev_name, role, &final_room, &token).await
+    {
+        Ok(d) => d,
+        Err(_) => {
+            // 设备创建失败：释放占位让码仍可核销（attempts 已计数，熔断不受影响）
+            let _ = pairing_code::Entity::update_many()
+                .col_expr(pairing_code::Column::UsedBy, Expr::value(None::<String>))
+                .filter(pairing_code::Column::Code.eq(code))
+                .filter(pairing_code::Column::UsedBy.eq(pending.clone()))
+                .exec(&state.db)
+                .await;
+            return Err(PairErr::Invalid);
+        }
+    };
+    // 占位转正为设备 id（WHERE 占位值，防释放窗口内被他人抢注）
+    let _ = pairing_code::Entity::update_many()
+        .col_expr(pairing_code::Column::UsedBy, Expr::value(dev_id.clone()))
+        .filter(pairing_code::Column::Code.eq(code))
+        .filter(pairing_code::Column::UsedBy.eq(pending))
+        .exec(&state.db)
+        .await;
 
     // 记录环境（展示名由管理台维护）
     let _ = crate::room::touch(state, &final_room).await;

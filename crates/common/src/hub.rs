@@ -288,6 +288,9 @@ impl WsHub {
             .unwrap_or(true);
         if empty {
             rooms.remove(&conn.room);
+            // 空房的续传环一并回收：环无消费方，留着只长内存
+            // （重连回放只对「有活跃对端」的房间有意义；新入房 since=0 本就不看环）
+            self.buf_clear_room(&conn.room);
         }
     }
 
@@ -411,23 +414,27 @@ impl WsHub {
 
     // ---- 续传缓冲（隧道帧 seq 落环，断点回放） ----
 
-    /// 分配下一 seq（帧内注入后调 buf_push 落环）
-    pub fn buf_alloc(&self, dest: &str) -> u64 {
-        let mut bufs = self.bufs.lock().unwrap();
-        let ring = bufs.entry(dest.to_string()).or_insert_with(SeqRing::new);
-        let seq = ring.next_seq;
-        ring.next_seq += 1;
-        seq
-    }
-
-    /// 帧落环（调用方负责 seq 与帧内容一致）
-    pub fn buf_push(&self, dest: &str, seq: u64, frame: Vec<u8>, is_binary: bool) {
+    /// 分配 seq、构帧并入环（原子）：seq 注入与落环在同一把锁内完成——此前
+    /// alloc/push 两次加锁，多 client 并发时交错，seq 与落环次序不一致 →
+    /// 回放判洞误报 Reset。返回 (seq, 帧字节)：字节与入环内容同一份（发送方
+    /// 直接用，不再二次 clone）。超大帧（≥环字节上限）不入环：入了也会立刻
+    /// 自逐出留永久洞；seq 照常分配，对端重连按洞判 Reset（安全降级）。
+    pub fn buf_alloc_push_with<F>(&self, dest: &str, is_binary: bool, build: F) -> (u64, Vec<u8>)
+    where
+        F: FnOnce(u64) -> Vec<u8>,
+    {
         let mut bufs = self.bufs.lock().unwrap();
         let ring = bufs.entry(dest.to_string()).or_insert_with(SeqRing::new);
         let now = now_secs();
-        ring.bytes += frame.len();
-        ring.items.push_back((seq, now, frame, is_binary));
-        ring.evict(now);
+        let seq = ring.next_seq;
+        ring.next_seq += 1;
+        let frame = build(seq);
+        if frame.len() < BUF_MAX_BYTES {
+            ring.bytes += frame.len();
+            ring.items.push_back((seq, now, frame.clone(), is_binary));
+            ring.evict(now);
+        }
+        (seq, frame)
     }
 
     /// 断点回放：since=端点已处理的最大 seq（0=从未收到）
@@ -470,5 +477,113 @@ impl WsHub {
             .lock()
             .unwrap()
             .retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    /// /api/metrics 快照：(续传环数, 环内字节水位)。环字节水位是慢端信号——
+    /// 长期贴着 BUF_MAX_BYTES 说明有端收不动、在靠 TTL 裁剪硬扛。
+    pub fn buf_stats(&self) -> (usize, usize) {
+        let bufs = self.bufs.lock().unwrap();
+        let bytes = bufs.values().map(|r| r.bytes).sum::<usize>();
+        (bufs.len(), bytes)
+    }
+}
+
+// ---- 单测：续传环（分配/回放/判洞/裁剪/清房） ----
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_alloc_replay_roundtrip() {
+        let hub = WsHub::new();
+        let dest = buf_key_host("rooma");
+        let (s1, f1) = hub.buf_alloc_push_with(&dest, false, |seq| format!("m{seq}").into_bytes());
+        let (s2, _) = hub.buf_alloc_push_with(&dest, false, |seq| format!("m{seq}").into_bytes());
+        assert_eq!((s1, s2), (1, 2));
+        // since=0 → 整段回放（帧字节与发送侧同一内容）
+        match hub.buf_replay(&dest, 0) {
+            Replay::Frames(fs) => {
+                assert_eq!(fs.len(), 2);
+                assert_eq!(fs[0], (f1, false));
+            }
+            _ => panic!("完整环应整段回放"),
+        }
+        // 断点续传：since=1 只补第二帧
+        match hub.buf_replay(&dest, 1) {
+            Replay::Frames(fs) => assert_eq!(fs.len(), 1),
+            _ => panic!("断点后应只补增量"),
+        }
+        // 追平 → 空回放（非 Reset）
+        match hub.buf_replay(&dest, 2) {
+            Replay::Frames(fs) => assert!(fs.is_empty()),
+            _ => panic!("追平后应回空而非 Reset"),
+        }
+    }
+
+    #[test]
+    fn ring_reset_on_missing_history_and_future_since() {
+        let hub = WsHub::new();
+        // 无环 + since>0 → 服务侧无历史 → Reset
+        assert!(matches!(hub.buf_replay(&buf_key_host("none"), 5), Replay::Reset));
+        // 无环 + since=0 → 干净起点（空帧序列）
+        assert!(matches!(hub.buf_replay(&buf_key_host("none"), 0), Replay::Frames(_)));
+        let dest = buf_key_host("roomb");
+        hub.buf_alloc_push_with(&dest, false, |_| b"only".to_vec());
+        // 端点比服务超前（服务重启 seq 重置）→ Reset
+        assert!(matches!(hub.buf_replay(&dest, 9), Replay::Reset));
+    }
+
+    #[test]
+    fn ring_oversize_frame_allocates_seq_without_storage() {
+        let hub = WsHub::new();
+        let dest = buf_key_host("roomc");
+        let big = vec![0u8; BUF_MAX_BYTES]; // ≥上限：不入环（防自逐出留洞）
+        let (seq, out) = hub.buf_alloc_push_with(&dest, true, |_| big.clone());
+        assert_eq!(seq, 1);
+        assert_eq!(out.len(), BUF_MAX_BYTES); // 发送方仍拿到完整帧直发
+        {
+            let bufs = hub.bufs.lock().unwrap();
+            let ring = bufs.get(dest.as_str()).unwrap();
+            assert!(ring.items.is_empty());
+            assert_eq!(ring.bytes, 0);
+        }
+        // 首帧即洞：since=0 → Reset（对端安全降级重拉）；since 追平 → 空回放
+        assert!(matches!(hub.buf_replay(&dest, 0), Replay::Reset));
+        assert!(matches!(hub.buf_replay(&dest, 1), Replay::Frames(_)));
+    }
+
+    #[test]
+    fn ring_eviction_trims_oldest_and_keeps_tail_contiguous() {
+        let hub = WsHub::new();
+        let dest = buf_key_host("roomd");
+        for _ in 0..5 {
+            // 5×40KB = 200KB > 128KB 上限：最老的先被裁
+            hub.buf_alloc_push_with(&dest, false, |_| vec![0u8; 40 * 1024]);
+        }
+        let first_kept = {
+            let bufs = hub.bufs.lock().unwrap();
+            let ring = bufs.get(dest.as_str()).unwrap();
+            assert!(ring.bytes <= BUF_MAX_BYTES, "裁剪后不得超预算");
+            ring.items.front().unwrap().0
+        };
+        assert!(first_kept > 1, "最老帧应被裁出");
+        // 首帧被裁 → since=0 首帧不衔接 → Reset（安全降级）
+        assert!(matches!(hub.buf_replay(&dest, 0), Replay::Reset));
+        // 从首个存活帧起 → 尾部连续可回放
+        match hub.buf_replay(&dest, first_kept - 1) {
+            Replay::Frames(fs) => assert!(!fs.is_empty()),
+            _ => panic!("存活尾段应可回放"),
+        }
+    }
+
+    #[test]
+    fn buf_clear_room_drops_ring() {
+        let hub = WsHub::new();
+        let dest = buf_key_host("roome");
+        hub.buf_alloc_push_with(&dest, false, |_| b"x".to_vec());
+        hub.buf_clear_room("roome");
+        // 环已删：since=0 → 干净起点（而非残留历史）
+        assert!(matches!(hub.buf_replay(&dest, 0), Replay::Frames(_)));
+        assert!(matches!(hub.buf_replay(&dest, 1), Replay::Reset));
     }
 }

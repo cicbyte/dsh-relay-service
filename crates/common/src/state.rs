@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -18,6 +19,8 @@ pub struct AppState {
     pub login_guard: Arc<LoginGuard>,
     /// room→owner 元数据缓存（连接鉴权/审计高频读；安全敏感的令牌校验严禁走缓存）
     pub owner_cache: Arc<OwnerCache>,
+    /// 进程内指标（/api/metrics 快照）
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -34,7 +37,43 @@ impl AppState {
             hub: Arc::new(WsHub::new()),
             login_guard: Arc::new(LoginGuard::new()),
             owner_cache: Arc::new(OwnerCache::new()),
+            metrics: Arc::new(Metrics::new()),
         }
+    }
+}
+
+/// 进程内指标：原子计数无锁；进程重启归零（快照型，不做持久化聚合）。
+/// 之前只有日志没有数字——「通道最近忙不忙、转发量多大」只能翻日志数行数。
+pub struct Metrics {
+    /// 进程启动时刻（epoch 秒，uptime 基准）
+    pub started_at: i64,
+    /// ws 连接建立总数（鉴权成功后计数）
+    pub ws_connects: AtomicU64,
+    /// 收到的 ws 文本帧数（batch 信封按展开后计）
+    pub frames_in: AtomicU64,
+    /// 直发到对端的帧数（try_send 成功计；满队列丢弃不计——那是回放兜底的）
+    pub frames_relayed: AtomicU64,
+    /// http-req 转发次数
+    pub http_proxied: AtomicU64,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            started_at: chrono::Utc::now().timestamp(),
+            ws_connects: AtomicU64::new(0),
+            frames_in: AtomicU64::new(0),
+            frames_relayed: AtomicU64::new(0),
+            http_proxied: AtomicU64::new(0),
+        }
+    }
+
+    pub fn bump(&self, counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get(&self, counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
     }
 }
 

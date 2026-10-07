@@ -158,6 +158,8 @@ impl AppConfig {
         if let Ok(v) = std::env::var(format!("{env_prefix}_AUTH_MODE")) {
             cfg.ws.auth_mode = v;
         }
+        // 归一化（大小写/空白），配合 main.rs 的 fail-closed 白名单校验
+        cfg.ws.auth_mode = cfg.ws.auth_mode.trim().to_ascii_lowercase();
         if let Ok(v) = std::env::var(format!("{env_prefix}_DATABASE_URL")) {
             cfg.database.url = v;
         }
